@@ -27,6 +27,56 @@ dependencies {
 
 // Dev convenience: serve static resources & templates directly from src/main/resources
 // (so edits to HTML/CSS/JS show up on F5 without rerunning processResources).
+//
+// Also auto-starts an ngrok tunnel as a sidecar so Adyen webhooks can reach
+// our local server on a stable public URL. The tunnel is torn down when
+// bootRun exits (Ctrl+C or normal shutdown).
+//
+// Opt-out:    NGROK_ENABLED=false ./gradlew bootRun
+// Override:   NGROK_DOMAIN=other.ngrok-free.dev ./gradlew bootRun
+ext.ngrokProcess = null
+def ngrokEnabled = (System.getenv('NGROK_ENABLED') ?: 'true').toBoolean()
+def ngrokDomain  = System.getenv('NGROK_DOMAIN') ?: 'coolingly-supercretaceous-branden.ngrok-free.dev'
+
 bootRun {
     sourceResources sourceSets.main
+
+    doFirst {
+        if (!ngrokEnabled) {
+            println '[ngrok] disabled via NGROK_ENABLED=false; skipping tunnel.'
+            return
+        }
+        def logFile = file("$buildDir/ngrok.log")
+        logFile.parentFile.mkdirs()
+        try {
+            def proc = ['ngrok', 'http', '8080', "--url=$ngrokDomain"].execute()
+            proc.consumeProcessOutput(logFile.newOutputStream(), logFile.newOutputStream())
+            // Give ngrok a moment to either connect or fail fast.
+            sleep 2000
+            if (proc.alive) {
+                project.ext.ngrokProcess = proc
+                println "[ngrok] started PID=${proc.pid()}"
+                println "[ngrok] public URL : https://$ngrokDomain"
+                println "[ngrok] webhook URL: https://$ngrokDomain/webhooks"
+                println "[ngrok] inspector  : http://localhost:4040"
+                println "[ngrok] logs       : $logFile"
+            } else {
+                println "[ngrok] failed to start; see $logFile"
+            }
+        } catch (Exception e) {
+            println "[ngrok] not started (is ngrok installed?): ${e.message}"
+        }
+    }
+}
+
+gradle.buildFinished {
+    def proc = project.ext.has('ngrokProcess') ? project.ext.ngrokProcess : null
+    if (proc != null && proc.alive) {
+        println "[ngrok] stopping tunnel (PID ${proc.pid()})..."
+        proc.destroy()
+        sleep 3000
+        if (proc.alive) {
+            proc.destroyForcibly()
+        }
+    }
 }
