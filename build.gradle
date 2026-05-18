@@ -24,3 +24,9 @@ dependencies {
     implementation 'nz.net.ultraq.thymeleaf:thymeleaf-layout-dialect'
     developmentOnly 'org.springframework.boot:spring-boot-devtools'
 }
+
+// Dev convenience: serve static resources & templates directly from src/main/resources
+// (so edits to HTML/CSS/JS show up on F5 without rerunning processResources).
+bootRun {
+    sourceResources sourceSets.main
+}
