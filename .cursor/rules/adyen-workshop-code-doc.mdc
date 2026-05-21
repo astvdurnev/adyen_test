@@ -1,0 +1,142 @@
+---
+description: "Adyen workshop code documentation standards — verbose, educational comments with doc links so the reader can re-learn the integration by reading the code"
+globs:
+alwaysApply: true
+---
+
+# Adyen Workshop — Code Documentation Standards
+
+This is an **educational** project (Adyen partner training). The reader will come back weeks
+later and re-learn the payments integration by reading the code. Therefore every file we
+write or modify MUST be commented generously and with links to Adyen documentation.
+
+## File header (REQUIRED in every Java / JS / HTML file we touch)
+
+Keep it short — 3–5 lines, not a wall of text.
+
+**Java** (above the `package` declaration is fine, or as `/** */` above the class):
+
+```java
+/**
+ * <ClassName> — <one-line purpose>
+ * Workshop step(s): <e.g. Step 7, Step 9, Step 12>
+ * Adyen docs:       <https://docs.adyen.com/...>
+ * What & Why:       <one line explaining role in the payment flow>
+ */
+```
+
+**JavaScript** (top of file):
+
+```javascript
+/**
+ * <file purpose> — <one-line summary>
+ * Workshop step(s): <e.g. Step 8, Step 10>
+ * Adyen docs:       <https://docs.adyen.com/...>
+ * What & Why:       <Drop-in role: fetches /paymentMethods, mounts component, handles onSubmit>
+ */
+```
+
+**HTML / Thymeleaf** (top of file as `<!-- -->`):
+
+```html
+<!--
+  <template name> — <purpose>
+  Workshop step: <e.g. Step 6>
+  Why: <e.g. "loads Adyen.Web Drop-in script + stylesheet for all pages">
+-->
+```
+
+## Inline / line-level comments (the core of this rule)
+
+For every **non-trivial** line or small block of Adyen-specific code, add a comment with:
+1. **What** it does in one short phrase
+2. **Why** we do it that way (the *reason*, not the syntax)
+3. **Link** to Adyen docs when the line corresponds to an Adyen concept (`/payments`, `3DS2`, `HMAC`, `idempotency`, `BrowserInfo`, `returnUrl`, etc.)
+
+Place the comment on the line above, in English.
+
+### Good vs bad examples
+
+```java
+// BAD — narrates syntax, adds no understanding
+// create a new payment request
+var paymentRequest = new PaymentRequest();
+
+// GOOD — explains intent + links the relevant doc
+// Build the /payments request body. We re-create it on every call (stateless) and let
+// the Adyen Java library handle JSON serialization.
+// Docs: https://docs.adyen.com/api-explorer/Checkout/latest/post/payments
+var paymentRequest = new PaymentRequest();
+
+// GOOD — explains *why* a constant value was chosen
+// Hard-coded EUR 99.98 because the demo store sells items at €49.99 × 2.
+// Amount.value is in *minor units* (cents) per Adyen API convention.
+// Docs: https://docs.adyen.com/development-resources/currency-codes/
+var amount = new Amount().currency("EUR").value(9998L);
+
+// GOOD — flags a security/correctness concern
+// SECURITY: returnUrl must match an Allowed origin on the Client Key, otherwise
+// Adyen will reject the 3DS2 redirect.
+paymentRequest.setReturnUrl("http://localhost:8080/handleShopperRedirect");
+```
+
+```javascript
+// BAD
+// fetch payment methods
+const res = await fetch("/api/paymentMethods", { method: "POST" });
+
+// GOOD
+// Ask our backend for the list of payment methods configured on this merchant
+// account. The backend forwards this to Adyen's /paymentMethods endpoint
+// (we never call Adyen directly from the browser — API key must stay server-side).
+// Docs: https://docs.adyen.com/online-payments/build-your-integration/advanced-flow/#post-payment-methods-request
+const res = await fetch("/api/paymentMethods", { method: "POST" });
+```
+
+## Special tags (use when relevant)
+
+- `// SECURITY:` — anything involving API key, HMAC, Client Key origins, returnUrl, CSRF
+- `// CRITICAL:` — idempotency, ordering of operations, must-not-skip steps
+- `// NOTE:` — educational context (e.g. "this is what 3DS2 frictionless flow looks like")
+- `// DOCS:` — when a whole block deserves a doc link rather than per-line
+- `// TODO:` / `// FIXME:` — only for genuine follow-ups, never as a substitute for explanation
+
+## What NOT to comment
+
+Skip captain-obvious narration of the language itself:
+
+- `// constructor` above a constructor
+- `// import statement` above an import
+- `// return the response` above `return ResponseEntity.ok().body(response);`
+- `// loop over items` above a `for` loop with a self-evident name
+
+Comment the **Adyen domain**, not the **Java/JS syntax**.
+
+## Section dividers for long files
+
+When a file grows past ~80 lines, use simple dividers:
+
+```java
+// === Step 7: /paymentMethods =================================================
+```
+
+```javascript
+// === Step 10: onSubmit handler ===============================================
+```
+
+## When editing existing code
+
+If you change a line that has an outdated comment, **update the comment in the same edit**.
+A stale comment is worse than no comment.
+
+## Recommended doc links (use these often)
+
+- Online payments overview: https://docs.adyen.com/online-payments/
+- Advanced flow (Web Drop-in v6): https://docs.adyen.com/online-payments/build-your-integration/advanced-flow/
+- API Explorer: https://docs.adyen.com/api-explorer/
+- 3D Secure 2 (Redirect): https://docs.adyen.com/online-payments/3d-secure/redirect-3ds2/web-drop-in/
+- 3D Secure 2 (Native): https://docs.adyen.com/online-payments/3d-secure/native-3ds2/web-drop-in/
+- Idempotency: https://docs.adyen.com/development-resources/api-idempotency/
+- Webhooks + HMAC: https://docs.adyen.com/development-resources/webhooks/verify-hmac-signatures/
+- Test cards: https://docs.adyen.com/development-resources/testing/test-card-numbers/
+- Result codes: https://docs.adyen.com/development-resources/overview-response-handling/#result-codes

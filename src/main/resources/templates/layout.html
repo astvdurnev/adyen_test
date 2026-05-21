@@ -21,8 +21,41 @@
     />
     <link rel="stylesheet" href="/css/application.css"/>
 
-    <!-- Step 6 -->
-    <!-- Add Adyen.Web Components/Drop-in stylesheet and embed script -->
+    <!--
+      layout.html — base Thymeleaf layout included by every page (index, checkout, result).
+      Workshop step: Step 6
+      Why: loads the Adyen.Web v6 Drop-in once (script + stylesheet) so any page that
+           uses this layout can call `new AdyenCheckout(...)` / `new Dropin(...)`.
+      Docs: https://docs.adyen.com/online-payments/build-your-integration/advanced-flow/?platform=Web&integration=Drop-in
+    -->
+
+    <!--
+      Adyen.Web Drop-in stylesheet (v6.36.0).
+      Provides the default look-and-feel for card form, payment method list, etc.
+      We pin a specific version on purpose (latest as of 2026-05) — auto-updating
+      "latest" URLs are NOT recommended for production, and not great for a workshop
+      either because UI/behaviour could shift between runs.
+      Bumping later? Check: https://docs.adyen.com/online-payments/release-notes/
+      Note: we use the *-test CDN host because this app talks to Adyen TEST.
+            For LIVE, switch to checkoutshopper-live.cdn.adyen.com (and corresponding region).
+    -->
+    <link
+        rel="stylesheet"
+        href="https://checkoutshopper-test.cdn.adyen.com/checkoutshopper/sdk/6.36.0/adyen.css"
+    />
+
+    <!--
+      Adyen.Web Drop-in JavaScript SDK (v6.36.0).
+      After this loads, `window.AdyenWeb` is available globally and exposes the
+      `AdyenCheckout` factory and the `Dropin` component class (see adyenWebImplementation.js).
+      SECURITY: this script is served from Adyen's CDN, not bundled with our app, so we
+                automatically get bug-fix updates within the 6.36.x patch line via the CDN.
+                For stricter setups you can add `integrity="sha384-..."` (SRI hash).
+                See: https://docs.adyen.com/online-payments/release-notes (per-version SRI hashes)
+    -->
+    <script
+        src="https://checkoutshopper-test.cdn.adyen.com/checkoutshopper/sdk/6.36.0/adyen.js"
+    ></script>
 
 </head>
 <body>
