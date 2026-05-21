@@ -17,6 +17,8 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -526,5 +528,182 @@ public class ApiController {
     @GetMapping("/admin/tokens")
     public ResponseEntity<Map<String, TokenStore.TokenRecord>> listTokens() {
         return ResponseEntity.ok(tokenStore.snapshot());
+    }
+
+    // ========================================================================
+    // === Module 2 / Phase 9: charge the stored token (MIT subscription) ===
+    // ========================================================================
+
+    // Fixed monthly subscription price (€5.00). Stored in minor units (cents) as
+    // Adyen expects. Kept as a constant on the controller so workshop participants
+    // can find/change it in one place; in production this would come from a
+    // products/plans table.
+    private static final long SUBSCRIPTION_AMOUNT_MINOR_UNITS = 500L; // €5.00
+    private static final String SUBSCRIPTION_CURRENCY = "EUR";
+
+    /**
+     * POST /api/subscription-payment — charges the saved card via a
+     * Merchant-Initiated Transaction (MIT).
+     * Workshop module: Module 2 / Phase 9
+     * Adyen docs:      https://docs.adyen.com/online-payments/tokenization/use-token/
+     * What & Why:      The shopper is NOT present anymore. We construct a
+     *                  /payments call that says "use the previously stored card
+     *                  for this shopperReference and charge €5.00". Key differences
+     *                  vs the regular /api/payments:
+     *                    - paymentMethod = CardDetails with storedPaymentMethodId
+     *                    - shopperInteraction = ContAuth (continuous authorisation,
+     *                      i.e. MIT) → no 3DS2 challenge, exempt from SCA
+     *                    - no returnUrl / no browserInfo / no billingAddress —
+     *                      they are only needed for shopper-present flows
+     *                    - recurringProcessingModel must match the model used
+     *                      when the token was created (Subscription).
+     */
+    @PostMapping("/api/subscription-payment")
+    public ResponseEntity<PaymentResponse> subscriptionPayment(@RequestBody Map<String, Object> body) throws IOException, ApiException {
+        // We accept a tiny ad-hoc body shape `{ "shopperReference": "..." }` rather
+        // than a full PaymentRequest, because most fields are server-decided and
+        // we don't want the frontend dictating amount or token id.
+        String shopperReference = body.get("shopperReference") instanceof String s ? s : null;
+        if (shopperReference == null || shopperReference.isBlank()) {
+            log.warn("/api/subscription-payment called without shopperReference");
+            return ResponseEntity.badRequest().build();
+        }
+
+        // Look up the token in our local store. If a real backend, this would also
+        // check that the subscription is still active and not paused/cancelled.
+        TokenStore.TokenRecord tokenRecord = tokenStore.get(shopperReference);
+        if (tokenRecord == null) {
+            log.warn("No stored token for shopperReference={}", shopperReference);
+            return ResponseEntity.status(404).build();
+        }
+
+        var response = chargeStoredToken(shopperReference, tokenRecord);
+        return ResponseEntity.ok().body(response);
+    }
+
+    // ========================================================================
+    // === Module 2 / Phase 9 (cont'd): batch charge — emulates a cron job ==
+    // ========================================================================
+
+    /**
+     * POST /api/subscriptions-charge-all — charges every subscriber with a stored
+     * token, sequentially. This is what a real "monthly billing" cron would do.
+     * Workshop module: Module 2 / Phase 9 (admin tooling)
+     * Adyen docs:      https://docs.adyen.com/online-payments/tokenization/use-token/
+     * What & Why:      Used by the /subscription/admin page's "Emulate Scheduled
+     *                  Job" button. Returns one summary row per shopper so the UI
+     *                  can render a table of results. Per-shopper failures are
+     *                  caught and reported instead of aborting the whole batch —
+     *                  a cron job that fails on shopper #3 must not skip #4..#N.
+     *
+     *                  In production this would be: paged, parallel (bounded
+     *                  concurrency), retried with exponential backoff, written
+     *                  to an "invoice" table, and triggered by Spring's
+     *                  @Scheduled cron rather than a button.
+     */
+    @PostMapping("/api/subscriptions-charge-all")
+    public ResponseEntity<List<Map<String, Object>>> chargeAllSubscriptions() {
+        Map<String, TokenStore.TokenRecord> all = tokenStore.snapshot();
+        log.info("Batch charge: {} subscriber(s) in the store", all.size());
+
+        // LinkedHashMap preserves insertion order so the UI shows results in the
+        // same order as the table.
+        List<Map<String, Object>> results = new ArrayList<>();
+
+        for (Map.Entry<String, TokenStore.TokenRecord> entry : all.entrySet()) {
+            String shopperReference = entry.getKey();
+            TokenStore.TokenRecord token = entry.getValue();
+
+            // Per-row result. Same keys for both success and failure cases so the
+            // frontend can render the table without branching.
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("shopperReference", shopperReference);
+
+            try {
+                var response = chargeStoredToken(shopperReference, token);
+                row.put("resultCode", response.getResultCode() != null
+                        ? response.getResultCode().getValue() : null);
+                row.put("pspReference", response.getPspReference());
+                row.put("refusalReason", response.getRefusalReason());
+                row.put("error", null);
+            } catch (Exception e) {
+                // Network glitch / Adyen 5xx / SDK validation — log loud but keep
+                // going. The UI will surface the error string in the result column.
+                log.warn("Batch charge failed for shopperReference={}: {}", shopperReference, e.getMessage());
+                row.put("resultCode", null);
+                row.put("pspReference", null);
+                row.put("refusalReason", null);
+                row.put("error", e.getClass().getSimpleName() + ": " + e.getMessage());
+            }
+            results.add(row);
+        }
+
+        log.info("Batch charge complete: {} row(s)", results.size());
+        return ResponseEntity.ok(results);
+    }
+
+    /**
+     * Shared core of the single-shot and batch charge endpoints. Builds the MIT
+     * /payments call and returns Adyen's response. Throws on transport / SDK
+     * errors; callers decide whether to bubble up (single endpoint) or capture
+     * per row (batch).
+     */
+    private PaymentResponse chargeStoredToken(String shopperReference, TokenStore.TokenRecord tokenRecord)
+            throws IOException, ApiException {
+        var paymentRequest = new PaymentRequest();
+
+        // Fixed monthly amount. Minor units, EUR.
+        var amount = new Amount()
+                .currency(SUBSCRIPTION_CURRENCY)
+                .value(SUBSCRIPTION_AMOUNT_MINOR_UNITS);
+        paymentRequest.setAmount(amount);
+
+        paymentRequest.setMerchantAccount(applicationConfiguration.getAdyenMerchantAccount());
+        paymentRequest.setReference(UUID.randomUUID().toString());
+
+        // === The stored payment method ==========================================
+        // CardDetails is a polymorphic payment-method blob. For a tokenised charge
+        // we just point at the previously stored token; Adyen pulls the actual PAN
+        // from its Vault server-side. We do NOT have the PAN in our codebase, and
+        // we don't want to (PCI scope).
+        // Docs: https://docs.adyen.com/online-payments/tokenization/use-token/#make-a-payment-with-a-token
+        var card = new CardDetails()
+                .storedPaymentMethodId(tokenRecord.token())
+                .type(CardDetails.TypeEnum.SCHEME); // "scheme" = generic card network (Visa/MC/etc)
+        paymentRequest.setPaymentMethod(new CheckoutPaymentMethod(card));
+
+        // === The flags that turn this into a valid MIT ==========================
+        // shopperReference: tells Adyen which Vault entry's stored card to use and
+        // links the charge to the subscriber profile.
+        paymentRequest.setShopperReference(shopperReference);
+
+        // recurringProcessingModel MUST match the model used when the token was
+        // stored. We tokenise with Subscription in Phase 8, so we charge with
+        // Subscription here. Mismatching the model can cause issuer declines or
+        // SCA challenges (defeating the point of tokenisation).
+        paymentRequest.setRecurringProcessingModel(PaymentRequest.RecurringProcessingModelEnum.SUBSCRIPTION);
+
+        // shopperInteraction=ContAuth = "continuous authorisation" = merchant-
+        // initiated transaction. This is the CRITICAL flag: Adyen and the issuer
+        // both look at it to decide that no 3DS2 / SCA is required, since the
+        // shopper already authenticated once when the token was created.
+        // Docs: https://docs.adyen.com/online-payments/tokenization/use-token/#make-a-payment-with-a-token
+        paymentRequest.setShopperInteraction(PaymentRequest.ShopperInteractionEnum.CONTAUTH);
+
+        // countryCode is still useful for routing / acquirer selection.
+        paymentRequest.setCountryCode("NL");
+
+        var requestOptions = new RequestOptions();
+        requestOptions.setIdempotencyKey(UUID.randomUUID().toString());
+
+        log.info("Charging subscription: shopperReference={} amount={} {} token={}",
+                shopperReference,
+                SUBSCRIPTION_AMOUNT_MINOR_UNITS,
+                SUBSCRIPTION_CURRENCY,
+                tokenRecord.token());
+        var response = paymentsApi.payments(paymentRequest, requestOptions);
+        log.info("Subscription charge result: shopperReference={} resultCode={} pspReference={}",
+                shopperReference, response.getResultCode(), response.getPspReference());
+        return response;
     }
 }

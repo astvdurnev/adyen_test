@@ -1,0 +1,84 @@
+<!--
+  subscription-admin.html
+  Workshop module: Module 2 / Phase 9 (admin tooling)
+  Adyen docs:      https://docs.adyen.com/online-payments/tokenization/use-token/
+  What & Why:      Operator dashboard that lists every subscriber whose card we
+                   have on file. Per-row "Charge" button hits /api/subscription-payment,
+                   global "Emulate Scheduled Job" button hits /api/subscriptions-charge-all.
+                   In production this would be behind authentication and feature flags.
+-->
+<html lang="en"
+      xmlns:th="http://www.thymeleaf.org"
+      xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout"
+      layout:decorate="~{layout}">
+<head>
+    <title>Subscriptions admin</title>
+</head>
+<body>
+<div layout:fragment="content" id="payment-page">
+
+    <div class="admin-container">
+        <h2>Subscriptions admin</h2>
+        <p>
+            Monthly price: <strong th:text="${amountLabel}"></strong>.
+            Each charge is a Merchant-Initiated Transaction (MIT), no shopper
+            interaction required.
+        </p>
+
+        <!-- Global action: charge everyone. The big button. -->
+        <div class="admin-actions">
+            <button id="emulate-job-button" class="btn-primary"
+                    th:disabled="${#lists.isEmpty(subscriptions)}">
+                Emulate Scheduled Job (charge all)
+            </button>
+            <a href="/subscription" class="btn-secondary">
+                Back to subscribe page
+            </a>
+        </div>
+
+        <!-- Empty state — first thing a fresh workshop install will see. -->
+        <div th:if="${#lists.isEmpty(subscriptions)}" class="admin-empty">
+            <p>
+                No subscriptions stored yet. Go to
+                <a href="/subscription">/subscription</a> and tokenise a card first.
+            </p>
+        </div>
+
+        <!-- Subscriber table. Hidden when empty so we don't render empty thead. -->
+        <table th:unless="${#lists.isEmpty(subscriptions)}" class="admin-table">
+            <thead>
+                <tr>
+                    <th>Shopper reference</th>
+                    <th>Card brand</th>
+                    <th>Token</th>
+                    <th>Stored at</th>
+                    <th>Action</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr th:each="sub : ${subscriptions}"
+                    th:attr="data-shopper-reference=${sub.shopperReference}">
+                    <td><code th:text="${sub.shopperReference}"></code></td>
+                    <td th:text="${sub.brand}"></td>
+                    <td><code th:text="${sub.tokenMasked}"></code></td>
+                    <td th:text="${sub.createdAt}"></td>
+                    <td>
+                        <button class="row-charge-button btn-primary-small">
+                            Charge <span th:text="${amountLabel}"></span>
+                        </button>
+                        <span class="row-result"></span>
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+
+        <!-- Batch result panel (populated by JS). -->
+        <h3 th:unless="${#lists.isEmpty(subscriptions)}">Last batch run</h3>
+        <pre id="batch-result" class="charge-result"
+             th:unless="${#lists.isEmpty(subscriptions)}"></pre>
+    </div>
+
+    <script type="text/javascript" src="/subscriptionAdmin.js"></script>
+</div>
+</body>
+</html>

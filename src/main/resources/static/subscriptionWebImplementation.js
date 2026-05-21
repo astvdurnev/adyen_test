@@ -1,23 +1,26 @@
 /**
- * subscriptionWebImplementation.js — Adyen.Web Drop-in for the /subscription page.
- * Workshop module: Module 2 / Phase 8
- * Adyen docs:      https://docs.adyen.com/online-payments/tokenization/create-a-token/
- * What & Why:      Same Drop-in pattern as adyenWebImplementation.js, but:
- *                    - posts to /api/subscription-create (not /api/payments)
- *                    - sends `shopperReference` so the backend can tie the
- *                      resulting token to a subscriber id
- *                    - displays a €0.00 button (we're verifying, not charging)
- *                  Kept as a separate file for clarity — copy-paste of the original
- *                  is intentional so workshop participants can diff the two and see
- *                  exactly what changes for tokenisation.
+ * subscriptionWebImplementation.js — JS for the /subscription page.
+ * Workshop module: Module 2 / Phase 8 + Phase 9
+ * Adyen docs:      https://docs.adyen.com/online-payments/tokenization/
+ * What & Why:      Two responsibilities on one page:
+ *                    1. (Phase 8) If no token saved yet — render Adyen Drop-in
+ *                       and POST encrypted card data to /api/subscription-create.
+ *                    2. (Phase 9) If a token IS saved — wire the "Charge €5.00"
+ *                       button to /api/subscription-payment (MIT, no Drop-in).
+ *                  Which path runs is decided by the hidden #hasToken div, which
+ *                  ViewController pre-renders based on TokenStore lookup.
  */
 
 const clientKey = document.getElementById("clientKey").innerHTML;
 
-// Server-rendered subscriber id. We send it with every /api/subscription-create
-// call so the backend can pass it as `shopperReference` to Adyen, which in turn
-// echoes it back to us via the AUTHORISATION webhook.
+// Server-rendered subscriber id. We send it with every /api/subscription-* call
+// so the backend can pass it as `shopperReference` to Adyen, which in turn echoes
+// it back to us via the AUTHORISATION webhook.
 const shopperReference = document.getElementById("shopperReference").innerHTML;
+
+// Thymeleaf renders boolean true/false as text. Comparing to the string literal
+// keeps things deterministic — no need to coerce.
+const hasToken = (document.getElementById("hasToken").innerHTML.trim() === "true");
 
 const { AdyenCheckout, Dropin } = window.AdyenWeb;
 
@@ -195,4 +198,80 @@ function handleOnSubscriptionFailed(response) {
     }
 }
 
-startSubscription();
+// ============================================================================
+// === Phase 9 — Charge the stored token =====================================
+// ============================================================================
+
+/**
+ * Wires the "Charge €5.00 now" button. The button is only present in the DOM
+ * when the page was rendered for a shopper who already has a token (see
+ * subscription.html `th:if="${hasToken}"`).
+ *
+ * Calls POST /api/subscription-payment with just `{ shopperReference }`. All
+ * sensitive data (token id, amount) is server-side; the browser only triggers.
+ */
+function wireChargeButton() {
+    const button = document.getElementById("charge-button");
+    const resultPre = document.getElementById("charge-result");
+    if (!button || !resultPre) return;
+
+    button.addEventListener("click", async () => {
+        // Disable the button to prevent double-clicks. Real charges are
+        // idempotent on the server (UUID key per call), but the UX still wants
+        // a "in flight" state.
+        button.disabled = true;
+        button.textContent = "Charging…";
+        resultPre.textContent = "";
+
+        try {
+            const response = await fetch("/api/subscription-payment", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ shopperReference: shopperReference }),
+            });
+
+            // Backend returns the full PaymentResponse. We display it raw — this
+            // is a workshop, after all; in production you'd map it to nice copy.
+            const text = await response.text();
+            let parsed;
+            try { parsed = JSON.parse(text); } catch { parsed = text; }
+
+            if (!response.ok) {
+                resultPre.textContent =
+                    "HTTP " + response.status + "\n" + JSON.stringify(parsed, null, 2);
+                button.textContent = "Charge failed — try again";
+                button.disabled = false;
+                return;
+            }
+
+            // Successful HTTP. resultCode tells us whether Adyen authorised the
+            // charge (Authorised) or refused it (Refused).
+            const summary =
+                "resultCode: " + (parsed.resultCode || "?") +
+                "\npspReference: " + (parsed.pspReference || "?") +
+                "\n\nFull response:\n" + JSON.stringify(parsed, null, 2);
+            resultPre.textContent = summary;
+
+            button.textContent = parsed.resultCode === "Authorised"
+                ? "Charged ✓ — click to charge again"
+                : "Adyen returned " + parsed.resultCode + " — click to retry";
+            button.disabled = false;
+        } catch (error) {
+            console.error("Charge failed", error);
+            resultPre.textContent = "Network error: " + error.message;
+            button.textContent = "Charge failed — try again";
+            button.disabled = false;
+        }
+    });
+}
+
+// ============================================================================
+// === Bootstrap =============================================================
+// ============================================================================
+// We pick exactly one path: if a token is already stored, we don't even load
+// Drop-in (no point — we'd just be re-collecting a card we already have).
+if (hasToken) {
+    wireChargeButton();
+} else {
+    startSubscription();
+}

@@ -252,38 +252,37 @@ Architecture choices (agreed with user):
 
 ---
 
-## Phase 8 — Subscription create + token capture
+## Phase 8 — Subscription create + token capture ✅
 
 **Goal:** the shopper visits a subscription page, completes a €0 zero-auth payment;
 Adyen sends an AUTHORISATION webhook containing the `recurringDetailReference`; the
 server stores it under the shopper's reference.
 
 Tasks:
-- [ ] **TokenStore** Spring service backed by `build/tokens.json`
+- [x] **TokenStore** Spring service backed by `build/tokens.json`
   - `Map<shopperReference, TokenRecord>` where `TokenRecord` has `token`, `brand`,
     `recurringProcessingModel`, `createdAt`
   - Atomic save (write to `.tmp` then rename)
   - Load on `@PostConstruct`
-- [ ] **`POST /api/subscription-create`** in `ApiController`
+- [x] **`POST /api/subscription-create`** in `ApiController`
   - Body: same as `/api/payments` (payment method data) + `shopperReference`
   - Builds a PaymentRequest with: amount=0 EUR, `storePaymentMethod=true`,
     `recurringProcessingModel=Subscription`, `shopperInteraction=Ecommerce`,
     `shopperReference`, plus all the 3DS2 / risk fields we already use.
-- [ ] **Extend `WebhookController`** to capture tokens
+- [x] **Extend `WebhookController`** to capture tokens
   - On AUTHORISATION with `success=true`, read `additionalData.recurring.recurringDetailReference`
     and `additionalData.recurring.shopperReference`, push into TokenStore.
-- [ ] **Frontend** — new page
+- [x] **Frontend** — new page
   - `GET /subscription` route in `ViewController`
-  - `templates/subscription.html` (clones checkout.html, button reads "Subscribe")
-  - `static/subscriptionWebImplementation.js` (clones the checkout JS but POSTs to
-    `/api/subscription-create`, no LineItems on the request)
+  - `templates/subscription.html` (button reads "Subscribe")
+  - `static/subscriptionWebImplementation.js` (clone of checkout JS, POSTs to
+    `/api/subscription-create` with `shopperReference` in body)
+- [x] **`GET /admin/tokens`** debugging endpoint (bonus moved up from Phase 9).
 
-**Verification:**
-1. `curl GET /admin/tokens` (TBD) returns an empty map at startup.
-2. Pay €0 zero-auth via the new page with a card that supports tokenisation
-   (e.g. Visa `4111 1111 1111 1111` is fine on TEST).
-3. AUTHORISATION webhook arrives → server log shows `Stored token for shopper {ref}: {token}`.
-4. `build/tokens.json` on disk now contains the entry.
+**Verification (done):**
+1. `curl GET /admin/tokens` returns an empty map at startup. ✅
+2. Pay €0 zero-auth via `/subscription` with a 3DS2-capable Visa. ✅
+3. AUTHORISATION webhook arrives → token persisted in `build/tokens.json`. ✅
 
 ---
 
@@ -293,18 +292,45 @@ Tasks:
 interaction needed.
 
 Tasks:
-- [ ] **`POST /api/subscription-payment`** in `ApiController`
-  - Body: `{ "shopperReference": "..." }`
+- [x] **`POST /api/subscription-payment`** in `ApiController`
+  - Body: `{ "shopperReference": "..." }` (amount is server-side, fixed €5.00).
   - Look up token in TokenStore → 404 if missing.
-  - Build PaymentRequest: amount=500 EUR (€5), `paymentMethod={ storedPaymentMethodId: <token> }`,
-    `shopperReference`, `shopperInteraction=ContAuth`, `recurringProcessingModel=Subscription`.
-- [ ] **(Bonus)** `GET /admin/tokens` — list of stored tokens for debugging.
+  - Build PaymentRequest: amount=500 EUR (€5),
+    `paymentMethod=CardDetails().storedPaymentMethodId(<token>).type(SCHEME)`,
+    `shopperReference`, `shopperInteraction=ContAuth`, `recurringProcessingModel=Subscription`,
+    no returnUrl / no browserInfo / no 3DS2 (it's MIT).
+- [x] **`/subscription` page** now adapts to TokenStore state:
+  - No token yet → renders Drop-in (Phase 8 flow).
+  - Token exists → renders a "Charge €5.00 now" button + result panel; the button
+    POSTs to `/api/subscription-payment` and shows the resulting `resultCode` /
+    `pspReference`.
+- [x] **Admin tooling** (operator dashboard):
+  - `POST /api/subscriptions-charge-all` — batch charge endpoint. Loops over the
+    TokenStore snapshot, calls the shared `chargeStoredToken()` helper per row,
+    catches per-shopper failures so a bad row doesn't kill the rest. Returns a
+    JSON array `[{ shopperReference, resultCode, pspReference, refusalReason, error }]`.
+  - `GET /subscription/admin` view: table of all subscriptions with per-row
+    "Charge €5.00" buttons and a global "Emulate Scheduled Job (charge all)"
+    button. Tokens are masked to last 4 chars on display.
+  - `static/subscriptionAdmin.js` wires both interaction modes and distributes
+    batch results back to each row's inline status.
+
+**README sections covered:** Tokenization "Charge the subscription".
 
 **Verification:**
-1. After Phase 8, `curl POST /api/subscription-payment -d '{"shopperReference":"foo"}'`
-   returns `Authorised` with a new pspReference.
-2. New AUTHORISATION webhook arrives for the €5 charge.
-3. Calling the endpoint with an unknown `shopperReference` returns 404.
+1. Have a token from Phase 8 (visible in `/admin/tokens` or `/subscription/admin`).
+2. Refresh `/subscription` — UI switches to the Charge block.
+3. Click "Charge €5.00 now":
+   - Server log: `Charging subscription: shopperReference=... amount=500 EUR token=...`.
+   - Response JSON shows `resultCode=Authorised` and a new `pspReference`.
+   - No 3DS2 challenge (no `action` in the response, `shopperInteraction=ContAuth`).
+4. A new AUTHORISATION webhook arrives for €5.00.
+5. Calling the endpoint with an unknown `shopperReference` returns HTTP 404.
+6. Open `/subscription/admin`:
+   - The subscriber row is present, with masked token and "Charge €5.00" button.
+   - Per-row button charges that shopper and updates the row's status.
+   - "Emulate Scheduled Job" button charges every row and shows the full Adyen
+     response payload in the result panel.
 
 ---
 

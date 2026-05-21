@@ -1,11 +1,13 @@
 <!--
   subscription.html
-  Workshop module: Module 2 / Phase 8
-  Adyen docs:      https://docs.adyen.com/online-payments/tokenization/create-a-token/
-  What & Why:      Page where a shopper enters card details to start a recurring
-                   subscription (€5/month "rented headphones"). The actual payment
-                   sent to Adyen is €0 — we authenticate the card via 3DS2 and
-                   ask Adyen to STORE it. Charging happens later (Phase 9).
+  Workshop module: Module 2 / Phase 8 + Phase 9
+  Adyen docs:      https://docs.adyen.com/online-payments/tokenization/
+  What & Why:      Two states on one page:
+                    - No token yet → render Drop-in to capture + tokenise a card.
+                    - Token exists → render a "Charge €5.00" button that hits
+                      /api/subscription-payment (MIT, no shopper interaction).
+                   ViewController decides which state we're in via the `hasToken`
+                   model attribute.
 -->
 <html lang="en"
       xmlns:th="http://www.thymeleaf.org"
@@ -18,29 +20,54 @@
 <div layout:fragment="content" id="payment-page">
     <!--
       Hidden divs carry server-rendered values into JavaScript.
-      We can't put secrets here, but clientKey is public by design (it only
-      authorises requests from "Allowed origins" configured in CA).
+      clientKey is public by design; hasToken / tokenBrand are convenience flags
+      so the JS doesn't have to make an extra fetch to decide what to do.
     -->
     <div id="clientKey" class="hidden" th:text="${clientKey}"></div>
     <div id="shopperReference" class="hidden" th:text="${shopperReference}"></div>
+    <div id="hasToken" class="hidden" th:text="${hasToken}"></div>
+    <div id="tokenBrand" class="hidden" th:text="${tokenBrand}"></div>
 
     <div class="container">
         <h2>Rent a pair of headphones — €5/month</h2>
         <p>
-            We will verify your card now (€0.00). Future monthly charges will be
-            initiated by us using the saved card.
-        </p>
-        <p>
             <small>Subscriber id: <code th:text="${shopperReference}"></code></small>
+            &nbsp;|&nbsp;
+            <a href="/subscription/admin" class="admin-link">Admin: subscriptions dashboard</a>
         </p>
 
-        <!-- Drop-in renders here. Same UX as /checkout, just different submit URL. -->
-        <div class="payment-container">
-            <div id="payment" class="payment"></div>
+        <!-- =========================================================== -->
+        <!-- State A: NO token yet — show Drop-in for tokenisation.    -->
+        <!-- =========================================================== -->
+        <div th:if="${!hasToken}">
+            <p>
+                We will verify your card now (€0.00). Future monthly charges will be
+                initiated by us using the saved card.
+            </p>
+            <div class="payment-container">
+                <div id="payment" class="payment"></div>
+            </div>
+        </div>
+
+        <!-- =========================================================== -->
+        <!-- State B: token already saved — show Charge button.        -->
+        <!-- =========================================================== -->
+        <div th:if="${hasToken}" class="payment-container">
+            <p>
+                You're subscribed. Card on file:
+                <strong th:text="'***** ' + ${tokenBrand}"></strong>
+            </p>
+            <p>
+                This button simulates the monthly cron that charges every subscriber.
+                It performs a Merchant-Initiated Transaction (MIT) — no 3DS2 challenge,
+                no shopper interaction required.
+            </p>
+            <button id="charge-button" class="btn btn-primary">Charge €5.00 now</button>
+            <pre id="charge-result" class="charge-result"></pre>
         </div>
     </div>
 
-    <!-- Phase 8 frontend logic — initialises Drop-in and posts to /api/subscription-create. -->
+    <!-- One JS file handles both states; it inspects #hasToken at startup. -->
     <script type="text/javascript" src="/subscriptionWebImplementation.js"></script>
 </div>
 </body>

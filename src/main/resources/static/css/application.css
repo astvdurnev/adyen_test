@@ -389,6 +389,188 @@ a:hover {
     height: 100%;
 }
 
+/* Subscription charge UI (Phase 9) */
+#charge-button {
+    background: #00112c;
+    border: 0;
+    border-radius: 6px;
+    color: #fff;
+    cursor: pointer;
+    display: inline-block;
+    font-size: 1em;
+    font-weight: 500;
+    margin: 16px 0 8px 0;
+    padding: 15px 24px;
+    text-align: center;
+    transition: background 0.3s ease-out, box-shadow 0.3s ease-out;
+}
+
+#charge-button:hover:not(:disabled) {
+    background: #0abf53;
+}
+
+#charge-button:disabled {
+    background: #e6e9eb;
+    color: #687282;
+    cursor: not-allowed;
+}
+
+.charge-result {
+    background: #fff;
+    border: 1px solid #e6e9eb;
+    border-radius: 6px;
+    color: #00112c;
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    font-size: 13px;
+    margin-top: 16px;
+    padding: 12px;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+/* Subscriptions admin page (Phase 9) */
+.admin-container {
+    margin: 100px auto 32px auto;
+    max-width: 1110px;
+    width: 100%;
+    padding: 0 16px;
+}
+
+.admin-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: center;
+    margin-bottom: 24px;
+}
+
+.btn-primary,
+.btn-primary-small,
+.btn-secondary {
+    border: 0;
+    border-radius: 6px;
+    cursor: pointer;
+    font-weight: 500;
+    text-decoration: none;
+    transition: background 0.3s ease-out, box-shadow 0.3s ease-out;
+}
+
+.btn-primary {
+    background: #00112c;
+    color: #fff;
+    font-size: 1em;
+    padding: 14px 22px;
+}
+
+.btn-primary:hover:not(:disabled) {
+    background: #0abf53;
+}
+
+.btn-primary:disabled {
+    background: #e6e9eb;
+    color: #687282;
+    cursor: not-allowed;
+}
+
+.btn-primary-small {
+    background: #00112c;
+    color: #fff;
+    font-size: 13px;
+    padding: 8px 14px;
+}
+
+.btn-primary-small:hover:not(:disabled) {
+    background: #0abf53;
+}
+
+.btn-primary-small:disabled {
+    background: #e6e9eb;
+    color: #687282;
+    cursor: not-allowed;
+}
+
+.btn-secondary {
+    background: transparent;
+    border: 1px solid #00112c;
+    color: #00112c;
+    font-size: 0.95em;
+    padding: 13px 20px;
+}
+
+.btn-secondary:hover {
+    background: #f7f8f9;
+}
+
+.admin-empty {
+    background: #f7f8f9;
+    border: 1px dashed #e6e9eb;
+    border-radius: 6px;
+    color: #687282;
+    padding: 24px;
+    text-align: center;
+}
+
+.admin-table {
+    border-collapse: collapse;
+    width: 100%;
+    background: #fff;
+    border: 1px solid #e6e9eb;
+    border-radius: 6px;
+    overflow: hidden;
+}
+
+.admin-table th,
+.admin-table td {
+    padding: 12px 14px;
+    border-bottom: 1px solid #e6e9eb;
+    text-align: left;
+    font-size: 14px;
+    vertical-align: middle;
+}
+
+.admin-table thead th {
+    background: #f7f8f9;
+    color: #00112c;
+    font-weight: 600;
+    border-bottom: 1px solid #e6e9eb;
+}
+
+.admin-table tbody tr:last-child td {
+    border-bottom: none;
+}
+
+.admin-table code {
+    background: #f7f8f9;
+    border-radius: 4px;
+    padding: 2px 6px;
+    color: #00112c;
+    font-size: 12px;
+}
+
+.row-result {
+    display: inline-block;
+    margin-left: 10px;
+    font-size: 12px;
+    color: #687282;
+}
+
+.row-result-ok {
+    color: #0abf53;
+    font-weight: 600;
+}
+
+.row-result-error {
+    color: #c13c2c;
+    font-weight: 600;
+}
+
+.admin-link {
+    display: inline-block;
+    margin-top: 12px;
+    font-size: 0.9em;
+    color: #687282;
+}
+
 /* end Payments page */
 
 
