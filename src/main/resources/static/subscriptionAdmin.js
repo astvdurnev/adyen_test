@@ -68,10 +68,80 @@ function wirePerRowButtons() {
     // dynamic re-renders (e.g. if we add a "refresh" button later).
     document.querySelectorAll("tr[data-shopper-reference]").forEach((row) => {
         const shopperReference = row.getAttribute("data-shopper-reference");
-        const button = row.querySelector(".row-charge-button");
-        if (!button) return;
-        button.addEventListener("click", () => chargeOne(shopperReference, row));
+        const chargeBtn = row.querySelector(".row-charge-button");
+        const cancelBtn = row.querySelector(".row-cancel-button");
+        if (chargeBtn) {
+            chargeBtn.addEventListener("click", () => chargeOne(shopperReference, row));
+        }
+        if (cancelBtn) {
+            cancelBtn.addEventListener("click", () => cancelOne(shopperReference, row));
+        }
     });
+}
+
+/**
+ * Phase 10 — Cancel a subscription.
+ * Calls POST /api/subscriptions-cancel; on success removes the row from the
+ * table so the dashboard stays in sync with the TokenStore.
+ *
+ * Uses window.confirm() because the action is destructive (deletes the card
+ * from the Adyen Vault — irreversible from the merchant side).
+ */
+async function cancelOne(shopperReference, rowEl) {
+    if (!window.confirm("Cancel subscription for " + shopperReference + "?\n\n" +
+        "This deletes the stored card from the Adyen Vault. Cannot be undone.")) {
+        return;
+    }
+
+    const chargeBtn = rowEl.querySelector(".row-charge-button");
+    const cancelBtn = rowEl.querySelector(".row-cancel-button");
+    const status = rowEl.querySelector(".row-result");
+
+    [chargeBtn, cancelBtn].forEach((b) => { if (b) b.disabled = true; });
+    if (cancelBtn) cancelBtn.textContent = "Cancelling…";
+    if (status) { status.textContent = ""; status.className = "row-result"; }
+
+    try {
+        const resp = await fetch("/api/subscriptions-cancel", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ shopperReference }),
+        });
+        const text = await resp.text();
+        let parsed;
+        try { parsed = JSON.parse(text); } catch { parsed = { raw: text }; }
+
+        if (!resp.ok) {
+            if (status) {
+                status.textContent = "Cancel failed (HTTP " + resp.status + ")";
+                status.className = "row-result row-result-error";
+            }
+            if (cancelBtn) { cancelBtn.disabled = false; cancelBtn.textContent = "Cancel"; }
+            if (chargeBtn) chargeBtn.disabled = false;
+            console.error("Cancel failed", parsed);
+            return;
+        }
+
+        // Success: remove the row from the DOM with a tiny fade.
+        rowEl.style.transition = "opacity 0.3s ease-out";
+        rowEl.style.opacity = "0";
+        setTimeout(() => {
+            rowEl.remove();
+            // If that was the last subscriber, reload the page so the empty-state
+            // UI replaces the now-empty table.
+            if (document.querySelectorAll("tr[data-shopper-reference]").length === 0) {
+                window.location.reload();
+            }
+        }, 300);
+    } catch (e) {
+        console.error("Cancel network error", e);
+        if (status) {
+            status.textContent = "Error: " + e.message;
+            status.className = "row-result row-result-error";
+        }
+        if (cancelBtn) { cancelBtn.disabled = false; cancelBtn.textContent = "Cancel"; }
+        if (chargeBtn) chargeBtn.disabled = false;
+    }
 }
 
 // ============================================================================
@@ -102,6 +172,11 @@ async function wireBatchButton() {
         document.querySelectorAll(".row-charge-button").forEach((b) => {
             b.disabled = true;
             b.textContent = "Pending…";
+        });
+        // Disable Cancel buttons during the batch so an operator can't
+        // half-cancel a row mid-charge.
+        document.querySelectorAll(".row-cancel-button").forEach((b) => {
+            b.disabled = true;
         });
 
         try {
@@ -144,6 +219,11 @@ async function wireBatchButton() {
                     }
                 });
             }
+
+            // Re-enable Cancel buttons.
+            document.querySelectorAll(".row-cancel-button").forEach((b) => {
+                b.disabled = false;
+            });
 
             resultPre.textContent = JSON.stringify(payload, null, 2);
             batchButton.textContent = "Emulate Scheduled Job (charge all)";

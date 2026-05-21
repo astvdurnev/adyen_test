@@ -4,6 +4,7 @@ import com.adyen.Client;
 import com.adyen.Config;
 import com.adyen.enums.Environment;
 import com.adyen.service.checkout.PaymentsApi;
+import com.adyen.service.checkout.RecurringApi;
 import com.adyen.util.HMACValidator;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -66,6 +67,19 @@ public class DependencyInjectionConfiguration {
         // Re-uses the Client bean above. Spring caches @Bean return values by default,
         // so client() is only executed once — both beans share the same HTTP client.
         return new PaymentsApi(client());
+    }
+
+    /**
+     * Typed wrapper around the Checkout Recurring API
+     * (GET / DELETE /storedPaymentMethods). Used in Module 2 / Phase 10 to delete
+     * a stored token from the Adyen Vault when a subscription is cancelled.
+     * Adyen docs: https://docs.adyen.com/api-explorer/Checkout/latest/delete/storedPaymentMethods/(recurringId)
+     */
+    @Bean
+    RecurringApi recurringApi() {
+        // Shares the same Client bean as PaymentsApi — the SDK is fine with
+        // multiple service classes pointing at one HTTP client.
+        return new RecurringApi(client());
     }
 
     /**

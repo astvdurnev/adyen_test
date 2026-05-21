@@ -334,23 +334,47 @@ Tasks:
 
 ---
 
-## Phase 10 — Cancel the subscription
+## Phase 10 — Cancel the subscription ✅
 
 **Goal:** remove the token from both the Adyen Vault and our local store.
 
 Tasks:
-- [ ] **`POST /api/subscriptions-cancel`** in `ApiController`
-  - Body: `{ "shopperReference": "..." }`
-  - Look up token → 404 if missing.
+- [x] **`RecurringApi`** Spring bean in `DependencyInjectionConfiguration`
+  - Shares the same `Client` as `PaymentsApi`.
+- [x] **`POST /api/subscriptions-cancel`** in `ApiController`
+  - Body: `{ "shopperReference": "..." }`. Returns `{ removed: true, ... }` on success.
+  - Look up token → 404 if missing locally.
   - Call Adyen `DELETE /storedPaymentMethods/{tokenId}?shopperReference=...&merchantAccount=...`
-    via the Java library's `RecurringApi` (or low-level resource if needed).
-  - Remove from local TokenStore on success.
+    via `RecurringApi.deleteTokenForStoredPaymentDetails(...)`.
+  - On Adyen 422/404 (token already gone) we still clean up local store —
+    eventual consistency. On Adyen 5xx / network errors the local entry is kept
+    so the operator can retry.
+- [x] **Admin UI** (`/subscription/admin`)
+  - Added Cancel button to each row. Click prompts a confirm() then calls
+    `/api/subscriptions-cancel`. On success the row fades out and is removed.
+  - When the last row is removed the page auto-reloads to show the empty state.
+- [x] **Shopper UI** (`/subscription`)
+  - When `hasToken=true`, a "Cancel subscription" button appears next to
+    "Charge €5.00 now". Click prompts a confirm() then calls
+    `/api/subscriptions-cancel`. On success the page reloads — the next render
+    sees `hasToken=false` and shows the Drop-in path again (ready to subscribe
+    a fresh card).
+
+**README sections covered:** Tokenization "Cancel the subscription".
 
 **Verification:**
-1. Cancel removes the entry from `tokens.json`.
-2. Following `subscription-payment` for the same `shopperReference` → 404 / Adyen
-   "stored method not found".
-3. Token disappears from CA → Customers → Stored Payment Methods.
+1. Have at least one token (`/admin/tokens` or `/subscription/admin` non-empty).
+2. From `/subscription/admin`, click Cancel on a row:
+   - Confirm prompt appears with the shopperReference.
+   - Server log: `Cancelling subscription: shopperReference=... token=...`
+     followed by `Subscription cancelled: shopperReference=...`.
+   - Row fades out; `tokens.json` no longer contains that entry; the stored
+     method disappears from CA → Customers → Stored Payment Methods.
+3. From `/subscription`, click "Cancel subscription":
+   - Page reloads back to the Drop-in flow (ready to subscribe again).
+4. Calling `POST /api/subscriptions-cancel` with an unknown shopper → HTTP 404.
+5. Subsequent `POST /api/subscription-payment` for a cancelled shopper → HTTP 404
+   (local store check fails before we ever reach Adyen).
 
 ---
 

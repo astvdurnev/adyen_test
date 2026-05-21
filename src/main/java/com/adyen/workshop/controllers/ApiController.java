@@ -5,6 +5,7 @@ import com.adyen.model.checkout.*;
 import com.adyen.workshop.configurations.ApplicationConfiguration;
 import com.adyen.workshop.services.TokenStore;
 import com.adyen.service.checkout.PaymentsApi;
+import com.adyen.service.checkout.RecurringApi;
 import com.adyen.service.exception.ApiException;
 import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
@@ -31,13 +32,19 @@ public class ApiController {
 
     private final ApplicationConfiguration applicationConfiguration;
     private final PaymentsApi paymentsApi;
+    // Phase 10: deletes stored tokens from the Adyen Vault when a subscription
+    // is cancelled. Distinct from PaymentsApi because the SDK groups recurring
+    // endpoints under a separate service class.
+    private final RecurringApi recurringApi;
     private final TokenStore tokenStore;
 
     public ApiController(ApplicationConfiguration applicationConfiguration,
                          PaymentsApi paymentsApi,
+                         RecurringApi recurringApi,
                          TokenStore tokenStore) {
         this.applicationConfiguration = applicationConfiguration;
         this.paymentsApi = paymentsApi;
+        this.recurringApi = recurringApi;
         this.tokenStore = tokenStore;
     }
 
@@ -705,5 +712,84 @@ public class ApiController {
         log.info("Subscription charge result: shopperReference={} resultCode={} pspReference={}",
                 shopperReference, response.getResultCode(), response.getPspReference());
         return response;
+    }
+
+    // ========================================================================
+    // === Module 2 / Phase 10: cancel subscription (delete vault token) ===
+    // ========================================================================
+
+    /**
+     * POST /api/subscriptions-cancel — removes a stored card from the Adyen Vault
+     * and from our local TokenStore.
+     * Workshop module: Module 2 / Phase 10
+     * Adyen docs:      https://docs.adyen.com/api-explorer/Checkout/latest/delete/storedPaymentMethods/(recurringId)
+     *                  https://docs.adyen.com/online-payments/tokenization/remove-stored-payment-method/
+     * What & Why:      Calling DELETE /storedPaymentMethods/{tokenId} disables the
+     *                  stored card on Adyen's side; subsequent /payments calls
+     *                  using that token will be refused with "Stored payment
+     *                  method not found". We mirror this by removing the entry
+     *                  from our local TokenStore so the UI reflects reality.
+     *
+     *                  Response is `{ "removed": true }` on success. On error,
+     *                  appropriate HTTP status is returned.
+     */
+    @PostMapping("/api/subscriptions-cancel")
+    public ResponseEntity<Map<String, Object>> subscriptionsCancel(@RequestBody Map<String, Object> body) {
+        String shopperReference = body.get("shopperReference") instanceof String s ? s : null;
+        if (shopperReference == null || shopperReference.isBlank()) {
+            log.warn("/api/subscriptions-cancel called without shopperReference");
+            return ResponseEntity.badRequest().body(Map.of("error", "missing shopperReference"));
+        }
+
+        TokenStore.TokenRecord tokenRecord = tokenStore.get(shopperReference);
+        if (tokenRecord == null) {
+            log.warn("No stored token to cancel for shopperReference={}", shopperReference);
+            return ResponseEntity.status(404).body(Map.of(
+                    "error", "no stored subscription for this shopperReference",
+                    "shopperReference", shopperReference));
+        }
+
+        // Adyen call: DELETE /checkout/v71/storedPaymentMethods/{storedPaymentMethodId}
+        //   ?shopperReference=<our id>&merchantAccount=<...>
+        // The SDK returns void on success and throws ApiException on HTTP 4xx/5xx.
+        // Docs: https://docs.adyen.com/api-explorer/Checkout/latest/delete/storedPaymentMethods/(recurringId)
+        try {
+            log.info("Cancelling subscription: shopperReference={} token={}",
+                    shopperReference, tokenRecord.token());
+            recurringApi.deleteTokenForStoredPaymentDetails(
+                    tokenRecord.token(),
+                    shopperReference,
+                    applicationConfiguration.getAdyenMerchantAccount());
+        } catch (ApiException e) {
+            // Adyen returns 422 with errorCode 800 ("Contract not found") when the
+            // token is already gone (e.g. someone deleted it via CA). In that case
+            // we still clean up locally — eventual consistency is fine here.
+            int status = e.getStatusCode();
+            if (status == 422 || status == 404) {
+                log.warn("Adyen reported token already absent (status={}, msg={}). Cleaning up locally.",
+                        status, e.getMessage());
+                tokenStore.remove(shopperReference);
+                return ResponseEntity.ok(Map.of(
+                        "removed", true,
+                        "note", "Token was already gone in Adyen; local store cleaned up.",
+                        "shopperReference", shopperReference));
+            }
+            log.error("Cancel failed for shopperReference={}: status={} msg={}",
+                    shopperReference, status, e.getMessage());
+            return ResponseEntity.status(status > 0 ? status : 502)
+                    .body(Map.of("error", e.getMessage(), "shopperReference", shopperReference));
+        } catch (IOException e) {
+            // Network blip — leave the local entry intact so the operator can retry.
+            log.error("Cancel transport error for shopperReference={}", shopperReference, e);
+            return ResponseEntity.status(502)
+                    .body(Map.of("error", e.getMessage(), "shopperReference", shopperReference));
+        }
+
+        // Adyen accepted the delete → drop the local copy too.
+        tokenStore.remove(shopperReference);
+        log.info("Subscription cancelled: shopperReference={}", shopperReference);
+        return ResponseEntity.ok(Map.of(
+                "removed", true,
+                "shopperReference", shopperReference));
     }
 }

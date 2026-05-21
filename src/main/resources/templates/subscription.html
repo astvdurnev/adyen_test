@@ -50,7 +50,7 @@
         </div>
 
         <!-- =========================================================== -->
-        <!-- State B: token already saved — show Charge button.        -->
+        <!-- State B: token already saved — show Charge + Cancel.      -->
         <!-- =========================================================== -->
         <div th:if="${hasToken}" class="payment-container">
             <p>
@@ -62,7 +62,10 @@
                 It performs a Merchant-Initiated Transaction (MIT) — no 3DS2 challenge,
                 no shopper interaction required.
             </p>
-            <button id="charge-button" class="btn btn-primary">Charge €5.00 now</button>
+            <div class="subscription-actions">
+                <button id="charge-button" class="btn-primary">Charge €5.00 now</button>
+                <button id="cancel-button" class="btn-danger">Cancel subscription</button>
+            </div>
             <pre id="charge-result" class="charge-result"></pre>
         </div>
     </div>

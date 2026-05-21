@@ -266,12 +266,78 @@ function wireChargeButton() {
 }
 
 // ============================================================================
+// === Phase 10 — Cancel subscription ========================================
+// ============================================================================
+
+/**
+ * Wires the "Cancel subscription" button on /subscription. On success the page
+ * is reloaded — the server-side TokenStore now has no entry for this shopper,
+ * so ViewController will render the Drop-in path (State A) again.
+ *
+ * The button is destructive (it deletes the card from the Adyen Vault), so we
+ * gate the click on a confirm() prompt.
+ */
+function wireCancelButton() {
+    const button = document.getElementById("cancel-button");
+    const chargeButton = document.getElementById("charge-button");
+    const resultPre = document.getElementById("charge-result");
+    if (!button) return;
+
+    button.addEventListener("click", async () => {
+        if (!window.confirm(
+            "Cancel subscription for " + shopperReference + "?\n\n" +
+            "This deletes the stored card from the Adyen Vault. Cannot be undone."
+        )) {
+            return;
+        }
+
+        button.disabled = true;
+        if (chargeButton) chargeButton.disabled = true;
+        button.textContent = "Cancelling…";
+        if (resultPre) resultPre.textContent = "";
+
+        try {
+            const resp = await fetch("/api/subscriptions-cancel", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ shopperReference }),
+            });
+            const text = await resp.text();
+            let parsed;
+            try { parsed = JSON.parse(text); } catch { parsed = { raw: text }; }
+
+            if (!resp.ok) {
+                if (resultPre) {
+                    resultPre.textContent = "HTTP " + resp.status + "\n" + JSON.stringify(parsed, null, 2);
+                }
+                button.textContent = "Cancel failed — try again";
+                button.disabled = false;
+                if (chargeButton) chargeButton.disabled = false;
+                return;
+            }
+
+            // Success → reload the page. The server now reports hasToken=false,
+            // so ViewController + Thymeleaf will render the Drop-in flow on
+            // the next render, ready for a fresh subscription.
+            window.location.reload();
+        } catch (e) {
+            console.error("Cancel failed", e);
+            if (resultPre) resultPre.textContent = "Network error: " + e.message;
+            button.textContent = "Cancel failed — try again";
+            button.disabled = false;
+            if (chargeButton) chargeButton.disabled = false;
+        }
+    });
+}
+
+// ============================================================================
 // === Bootstrap =============================================================
 // ============================================================================
 // We pick exactly one path: if a token is already stored, we don't even load
 // Drop-in (no point — we'd just be re-collecting a card we already have).
 if (hasToken) {
     wireChargeButton();
+    wireCancelButton();
 } else {
     startSubscription();
 }
