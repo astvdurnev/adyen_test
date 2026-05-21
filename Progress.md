@@ -197,20 +197,28 @@ Tasks:
 
 ---
 
-## Phase 7 — Extra payment methods *(stretch goals)*
+## Phase 7 — Extra payment methods  *(DONE — browser tests pending)*
 
 Covers README steps: **18, 19**.
 
-- [ ] **iDeal**
-  - [ ] Enable iDeal in the Customer Area for our merchant
-  - [ ] Verify it appears in the Drop-in list
-  - [ ] Complete an end-to-end test payment
-- [ ] **Klarna**
-  - [ ] Enable Klarna in the Customer Area
-  - [ ] Add `LineItems` to the `/payments` request
-  - [ ] Complete an end-to-end test payment
+- [x] **iDeal**
+  - [x] iDeal enabled in Customer Area (verified — appears in /paymentMethods response).
+  - [x] Enrich `/api/paymentMethods` with `amount` (EUR 99.98), `countryCode=NL`,
+        `shopperLocale=nl_NL`, `channel=WEB` so Adyen returns iDeal in the list.
+  - [ ] **Manual browser test:** select iDeal, pick a test bank, complete the redirect.
+- [x] **Klarna**
+  - [x] Klarna enabled in Customer Area (verified — `klarna_paynow` in /paymentMethods).
+  - [x] Add `LineItems` (headphones + sunglasses, 2 × €49.99) to the `/api/payments`
+        request — sum equals `paymentRequest.amount.value` as required.
+  - [x] Add `countryCode=NL` to `paymentRequest` (Klarna refuses with "Invalid issuer
+        countrycode" without it).
+  - [x] Verified via curl: Klarna returns `RedirectShopper` + `action.redirect` →
+        Klarna-hosted confirmation flow.
+  - [ ] **Manual browser test:** select Klarna, click through the Klarna confirmation
+        page, complete on Adyen TEST.
 
-**Verification:** Both methods show up in the Drop-in on `/checkout?type=dropin`, can be selected, and complete on the Adyen TEST environment.
+**Verification:** `curl /api/paymentMethods` returns `ideal | scheme | klarna_paynow`.
+Klarna via curl produces a valid `RedirectShopper` response (no validation errors).
 
 ---
 

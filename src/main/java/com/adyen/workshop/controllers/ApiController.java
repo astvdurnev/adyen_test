@@ -52,10 +52,9 @@ public class ApiController {
      */
     @PostMapping("/api/paymentMethods")
     public ResponseEntity<PaymentMethodsResponse> paymentMethods() throws IOException, ApiException {
-        // Body of the /paymentMethods call. For the minimum viable request we only need
-        // the merchant account; richer requests can also include amount, country,
-        // shopperLocale, channel, etc., which Adyen uses to filter the returned list
-        // (e.g. it won't return iDeal for a non-EUR amount).
+        // Body of the /paymentMethods call. Adyen filters the returned list by the
+        // values we send: a method that doesn't support our amount/currency/country/
+        // channel combination is simply omitted from the response.
         // Docs: https://docs.adyen.com/api-explorer/Checkout/latest/post/paymentMethods#request
         var paymentMethodsRequest = new PaymentMethodsRequest();
 
@@ -64,10 +63,32 @@ public class ApiController {
         // lets us switch accounts (test vs. live, sandbox A vs. sandbox B) without code changes.
         paymentMethodsRequest.setMerchantAccount(applicationConfiguration.getAdyenMerchantAccount());
 
-        // NOTE: logging the *request* is fine (no card data, no secrets); logging the
-        // response is also safe at this stage — it only contains the list of methods,
-        // not shopper PAN data. Once we move to /payments we'll be more careful about
-        // what we log.
+        // === Step 18: enrichment so country-specific methods appear =================
+        // Without these fields, Adyen returns only the methods that work for ANY context
+        // (mainly cards). To get iDeal (NL-only, EUR-only) and Klarna_paynow (region-aware),
+        // we have to tell Adyen exactly what kind of payment the shopper is about to make.
+        // Docs: https://docs.adyen.com/online-payments/build-your-integration/sessions-flow/?platform=Web&integration=Drop-in#step-3-make-a-request
+
+        // Channel = WEB → Adyen filters out methods that only work on iOS/Android (e.g.
+        // Apple Pay / Google Pay native SDK variants). Web has its own equivalents.
+        paymentMethodsRequest.setChannel(PaymentMethodsRequest.ChannelEnum.WEB);
+
+        // Country of the shopper. NL is the workshop's home market. iDeal returns ONLY when
+        // countryCode = "NL" and amount.currency = "EUR"; outside that combo Adyen omits it.
+        paymentMethodsRequest.setCountryCode("NL");
+
+        // Shopper UI language for any server-side rendered strings (rare in Drop-in, but
+        // Adyen also uses it to decide locale-specific Klarna variants).
+        paymentMethodsRequest.setShopperLocale("nl_NL");
+
+        // The same EUR 99.98 used in /payments. Sending it here ensures the returned list
+        // matches what the shopper will see at the Pay button (e.g. BNPL methods often
+        // require a minimum amount and would be hidden for tiny transactions).
+        // Docs (currency codes): https://docs.adyen.com/development-resources/currency-codes/
+        paymentMethodsRequest.setAmount(new Amount().currency("EUR").value(9998L));
+
+        // NOTE: logging the *request* is fine (no card data, no secrets); the response is
+        // also safe at this stage — it only contains the list of methods, not shopper data.
         log.info("Retrieving available Payment Methods from Adyen {}", paymentMethodsRequest);
 
         // Synchronous HTTPS call to Adyen Checkout API (https://checkout-test.adyen.com).
@@ -119,6 +140,13 @@ public class ApiController {
         // 3DS2 challenges are rendered.
         // Docs: https://docs.adyen.com/api-explorer/Checkout/latest/post/payments#request-channel
         paymentRequest.setChannel(PaymentRequest.ChannelEnum.WEB);
+
+        // Shopper / merchant country for the order. Adyen routes the transaction through
+        // the appropriate acquirer based on this + the currency, and BNPL methods like
+        // Klarna REQUIRE it (they'll refuse with "Invalid issuer countrycode" otherwise).
+        // Hardcoded NL because our briefing is a Dutch store.
+        // Docs: https://docs.adyen.com/api-explorer/Checkout/latest/post/payments#request-countryCode
+        paymentRequest.setCountryCode("NL");
 
         // The only field we *copy* from the browser body: the encrypted payment method
         // (e.g. encryptedCardNumber / encryptedExpiryMonth / encryptedSecurityCode for
@@ -199,6 +227,31 @@ public class ApiController {
         billingAddress.setStreet("Rokin");
         billingAddress.setHouseNumberOrName("49");
         paymentRequest.setBillingAddress(billingAddress);
+
+        // === Step 19: LineItems for Klarna (and other BNPL methods) ===================
+        // Klarna requires an itemised breakdown of the basket — it displays the items
+        // on its confirmation page so the shopper sees exactly what they're paying for.
+        // Without lineItems, Klarna refuses with "Invalid lineItems".
+        // We populate it for EVERY /payments call (not just Klarna): cards ignore the
+        // field, so keeping it unconditional simplifies the code and helps the risk
+        // engine even on non-BNPL payments.
+        // CRITICAL: the SUM of lineItems amounts MUST equal paymentRequest.amount.value,
+        // otherwise Klarna will reject. Our basket: 2 × €49.99 = €99.98 → matches.
+        // Docs: https://docs.adyen.com/payment-methods/klarna/web-drop-in/?tab=_code_payments_code__2#step-1-make-a-payment
+        var headphones = new LineItem()
+                .id("sku-headphones-001")
+                .description("Premium wireless headphones")
+                .quantity(1L)
+                // amountIncludingTax is per-unit, in minor units (cents). €49.99 = 4999.
+                .amountIncludingTax(4999L);
+
+        var sunglasses = new LineItem()
+                .id("sku-sunglasses-001")
+                .description("Polarised sunglasses")
+                .quantity(1L)
+                .amountIncludingTax(4999L);
+
+        paymentRequest.setLineItems(java.util.List.of(headphones, sunglasses));
 
         // === Step 11: Idempotency key =================================================
         // If the network blips or the shopper double-clicks "Pay", we may end up retrying
