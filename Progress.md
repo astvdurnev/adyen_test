@@ -110,7 +110,7 @@ Tasks:
 
 ---
 
-## Phase 4 — 3D Secure 2 (Redirect flow)  *(BACKEND DONE — browser test pending)*
+## Phase 4 — 3D Secure 2 (Redirect flow)  *(DONE — browser-verified by user)*
 
 **Goal:** Cards that require strong customer authentication complete the redirect-based 3DS2
 challenge and return to our result pages.
@@ -144,47 +144,43 @@ Tasks:
 
 ---
 
-## Phase 5 — Native 3D Secure 2 *(optional)*
+## Phase 5 — Native 3D Secure 2 *(SKIPPED — optional)*
 
-**Goal:** Trigger and complete a 3DS2 challenge inline (no Adyen-hosted redirect),
-using the `onAdditionalDetails` hook on the Drop-in.
+Skipped intentionally: the Redirect 3DS2 flow from Phase 4 already covers the
+workshop's payment-acceptance goal. Native 3DS2 is a UX improvement (inline
+challenge instead of a full-page redirect) that can be added later.
 
-Covers README step: **13**.
-
-Tasks:
-- [ ] Switch authentication preference to native:
-  - [ ] `authenticationData.setThreeDSRequestData(new ThreeDSRequestData().nativeThreeDS(PREFERRED))`
-- [ ] Backend: `POST /api/payments/details` calls `paymentsApi.paymentsDetails(request)`
-- [ ] Frontend: add `onAdditionalDetails(state, component, actions)` →
-      POST `/api/payments/details`, then `actions.resolve({ resultCode })`
-
-**Verification:** Pay with a card that supports Native 3DS2; the challenge is shown inside the
-Drop-in (no browser redirect) and on completion the user lands on the result page.
+If you want to revisit:
+- Uncomment the `ThreeDSRequestData().nativeThreeDS(PREFERRED)` block in
+  `ApiController.payments(...)`.
+- Implement `POST /api/payments/details` (call `paymentsApi.paymentsDetails(...)`).
+- Add `onAdditionalDetails` hook on the Drop-in to POST to that endpoint.
 
 ---
 
-## Phase 6 — Webhooks with HMAC verification
+## Phase 6 — Webhooks with HMAC verification  *(DONE)*
 
 **Goal:** Adyen's notifications hit our `/webhooks` endpoint, are HMAC-validated, and are acknowledged with 202.
 
 Covers README step: **16**.
 
 Tasks:
-- [ ] CA: create a *Standard webhook* pointing to the ngrok URL (`https://<ngrok>.dev/webhooks`).
-- [ ] CA: generate and copy the HMAC key into `ADYEN_HMAC_KEY` (already in `.env`).
-- [ ] Implement `controllers/WebhookController.java#webhooks`:
-  - [ ] Parse `NotificationRequest.fromJson(json)`
-  - [ ] For the first `NotificationRequestItem`:
-    - [ ] `hmacValidator.validateHMAC(item, hmacKey)` — if false → `422 Unprocessable Entity`
-    - [ ] Log the event
-    - [ ] Return `202 Accepted`
-  - [ ] Catch `SignatureException` → `422`, other → `500`
+- [x] CA: Standard webhook configured to hit the ngrok URL.
+- [x] CA: HMAC key generated and stored in `ADYEN_HMAC_KEY` (`.env`).
+- [x] Implement `controllers/WebhookController.java#webhooks`:
+  - [x] Parse `NotificationRequest.fromJson(json)`
+  - [x] For the first `NotificationRequestItem`:
+    - [x] `hmacValidator.validateHMAC(item, hmacKey)` — false → `422`
+    - [x] Log the event (event code, success, pspReference, amount)
+    - [x] Return `202 [accepted]`
+  - [x] Catch `SignatureException` → `422`, anything else → `500` (so Adyen retries)
+  - [x] Extra: empty-batch payload also returns `422` (won't retry-loop)
 
 **Verification:**
-1. `./scripts/ngrok.sh` is running and exposing `coolingly-supercretaceous-branden.ngrok-free.dev`.
-2. Trigger a test webhook from CA → server logs show `Received webhook with event ...` and HMAC validation succeeds.
-3. Tamper with the HMAC key in `.env`, restart, send a test webhook → server returns 422.
-4. Run an end-to-end payment → AUTHORISATION webhook arrives and is logged.
+1. [x] ngrok tunnel `coolingly-supercretaceous-branden.ngrok-free.dev` reachable from outside (returns 422 to a tampered payload).
+2. [x] Synthetic webhook with valid HMAC → `202 [accepted]`.
+3. [x] Synthetic webhook with invalid HMAC → `422`.
+4. [x] **Real AUTHORISATION webhook from Adyen** arrived (pspReference `CJGXBM2G5Z6JS975`) and was logged as `Webhook OK`.
 
 ---
 
