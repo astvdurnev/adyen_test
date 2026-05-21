@@ -4,6 +4,7 @@ import com.adyen.model.notification.NotificationRequest;
 import com.adyen.model.notification.NotificationRequestItem;
 import com.adyen.util.HMACValidator;
 import com.adyen.workshop.configurations.ApplicationConfiguration;
+import com.adyen.workshop.services.PaymentStore;
 import com.adyen.workshop.services.TokenStore;
 import com.adyen.workshop.services.WebhookEventBus;
 import com.adyen.workshop.services.WorkshopInstanceId;
@@ -57,17 +58,22 @@ public class WebhookController {
     // TEST merchant account (token capture + live feed both gate on this).
     private final WorkshopInstanceId instanceId;
 
+    // Module 3 / Phase 11b — payment state machine updated from webhook events.
+    private final PaymentStore paymentStore;
+
     @Autowired
     public WebhookController(ApplicationConfiguration applicationConfiguration,
                              HMACValidator hmacValidator,
                              TokenStore tokenStore,
                              WebhookEventBus eventBus,
-                             WorkshopInstanceId instanceId) {
+                             WorkshopInstanceId instanceId,
+                             PaymentStore paymentStore) {
         this.applicationConfiguration = applicationConfiguration;
         this.hmacValidator = hmacValidator;
         this.tokenStore = tokenStore;
         this.eventBus = eventBus;
         this.instanceId = instanceId;
+        this.paymentStore = paymentStore;
     }
 
     /**
@@ -142,6 +148,11 @@ public class WebhookController {
             // Adyen sends back the token in additionalData. We extract it here
             // (only for successful AUTHORISATION events) and persist via TokenStore.
             maybeStoreSubscriptionToken(item);
+
+            // Module 3 / Phase 11b — update the pre-auth state machine.
+            // Mirrors webhook eventCode → PaymentStore.Status transition so the
+            // /preauthorisation UI table reflects what's actually happened.
+            maybeUpdatePaymentState(item);
 
             // Module 3 / Phase 11a — broadcast to every open dashboard.
             // Done AFTER all server-side state mutations (TokenStore, etc.) so
@@ -222,5 +233,82 @@ public class WebhookController {
                 brand,
                 "Subscription",   // Phase 8 only uses Subscription model
                 Instant.now()));
+    }
+
+    /**
+     * Maps an incoming webhook event onto a PaymentStore status transition.
+     * Workshop module: Module 3 / Phase 11b (and extended by 11c).
+     * Adyen docs:      https://docs.adyen.com/development-resources/webhooks/understand-notifications/
+     * What & Why:      The pre-auth lifecycle is driven by webhooks. The original
+     *                  /payments call gave us a pspReference; every subsequent
+     *                  /captures, /cancels, /refunds notification carries that
+     *                  same pspReference in `originalReference` (and a new psp
+     *                  for the modification itself). We look up the original
+     *                  one in PaymentStore and transition its status.
+     *
+     *                  Only processes webhooks tagged with our instance prefix
+     *                  (same multi-tenant guard as the SSE bus).
+     */
+    private void maybeUpdatePaymentState(NotificationRequestItem item) {
+        // Same multi-tenant filter as elsewhere — don't mutate state for events
+        // belonging to other workshop participants on a shared TEST account.
+        if (!instanceId.isOurs(item.getMerchantReference())) {
+            return;
+        }
+
+        String eventCode = item.getEventCode();
+        if (eventCode == null) return;
+
+        // The lookup key is ALWAYS the original payment's pspReference. For
+        // AUTHORISATION events the item's own pspReference IS the original;
+        // for modifications (CAPTURE / CANCELLATION / REFUND) Adyen sets the
+        // original in additionalData["originalReference"] and the new psp on
+        // the item itself.
+        String originalPsp = (item.getAdditionalData() != null)
+                ? item.getAdditionalData().get("originalReference")
+                : null;
+        String lookupPsp = (originalPsp != null && !originalPsp.isBlank())
+                ? originalPsp
+                : item.getPspReference();
+        boolean success = item.isSuccess();
+        String reason = item.getReason() != null ? item.getReason() : "";
+
+        switch (eventCode) {
+            // First-time auth — only useful if we somehow received the webhook
+            // BEFORE the API response (rare, but Adyen's docs say to handle it).
+            // The /api/preauthorisation handler creates the record on success,
+            // so the transition will normally be a no-op.
+            case "AUTHORISATION" -> {
+                if (success) {
+                    paymentStore.transition(lookupPsp,
+                            PaymentStore.Status.AUTHORISED,
+                            eventCode,
+                            "Authorisation confirmed by webhook");
+                }
+                // Failed AUTHORISATION webhooks for payments that weren't even
+                // recorded locally are noise — ignore.
+            }
+
+            // Capture finalisation — money actually moved (or didn't).
+            // Docs: https://docs.adyen.com/online-payments/capture/#capture-events
+            case "CAPTURE" -> paymentStore.transition(lookupPsp,
+                    success ? PaymentStore.Status.CAPTURED : PaymentStore.Status.CAPTURE_FAILED,
+                    eventCode,
+                    success ? "Funds captured" : "Capture refused: " + reason);
+
+            case "CAPTURE_FAILED" -> paymentStore.transition(lookupPsp,
+                    PaymentStore.Status.CAPTURE_FAILED,
+                    eventCode,
+                    "Capture failed: " + reason);
+
+            default -> {
+                // Phase 11c will handle CANCELLATION, TECHNICAL_CANCEL,
+                // AUTHORISATION_ADJUSTMENT, REFUND, REFUND_FAILED,
+                // REFUNDED_REVERSED. Until then we just log so the workshop
+                // user can see "unhandled" events on the live feed but knows
+                // PaymentStore won't reflect them yet.
+                log.debug("Webhook eventCode '{}' not yet handled by PaymentStore (Phase 11c)", eventCode);
+            }
+        }
     }
 }

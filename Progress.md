@@ -441,18 +441,68 @@ Tasks:
 
 ---
 
-### Phase 11b — Pre-auth + Capture (planned)
+### Phase 11b — Pre-auth + Capture ✅
 
-- `PaymentStore` service (mirrors `TokenStore`) with `build/payments.json`,
-  tracking `pspReference → { merchantReference, amount, currency, status,
-  history[] }`.
-- `POST /api/preauthorisation` — `/payments` with `captureDelayHours = -1`
-  (per-payment manual capture) + custom amount from the UI.
-- `POST /api/capture` — `paymentsApi.captureAuthorisedPayment(pspRef, ...)`.
-- WebhookController updates `PaymentStore.status` on AUTHORISATION /
-  CAPTURE / CAPTURE_FAILED.
-- UI: amount input + Drop-in for new preauths, table of existing payments
-  with per-row "Capture" button.
+**Goal:** authorise a card without moving money, then capture (charge) it
+later via a separate API call. Cover the basic happy path
+preauth → capture and its failure modes.
+
+Tasks:
+- [x] **`ModificationsApi`** Spring bean in `DependencyInjectionConfiguration`
+  (shares the existing Adyen Client).
+- [x] **`PaymentStore`** service backed by `build/payments.json`:
+  - Record: `{ pspReference, merchantReference, amount, currency,
+    paymentMethod, status, createdAt, updatedAt, history[] }`.
+  - Finite-state machine: `AUTHORISED → CAPTURE_REQUESTED → CAPTURED`
+    (also `CAPTURE_FAILED`; later `CANCELLED` / `REFUNDED` in 11c).
+  - `create()` is idempotent (handles "webhook beat API response").
+  - `transition()` appends a `HistoryEntry` so the audit trail is preserved.
+- [x] **`POST /api/preauthorisation`** in `ApiController`:
+  - Reads `amount` from the body (UI input), defaults to nothing —
+    returns HTTP 400 if missing/invalid.
+  - Sets `captureDelayHours = -1` to disable auto-capture for THIS payment.
+  - Full 3DS2 (Native preferred) flow, identical to `/api/payments`.
+  - On `Authorised` response, creates a `PaymentStore` record so the row
+    appears in the UI before the AUTHORISATION webhook arrives.
+- [x] **`POST /api/capture`** in `ApiController`:
+  - Body: `{ pspReference, amount? }`. Defaults to the full stored amount.
+  - Calls `modificationsApi.captureAuthorisedPayment(pspRef, …)`.
+  - Marks the row as `CAPTURE_REQUESTED` immediately. CAPTURE webhook
+    transitions to `CAPTURED` (or `CAPTURE_FAILED`).
+  - Idempotency key on each request.
+- [x] **`GET /api/payments-list`** — snapshot for the UI poller.
+- [x] **`WebhookController.maybeUpdatePaymentState()`** mirrors `eventCode`
+  onto a `PaymentStore` transition (`AUTHORISATION`, `CAPTURE`,
+  `CAPTURE_FAILED`). Uses `additionalData.originalReference` to look up
+  the original payment for modification events. Gated by
+  `instanceId.isOurs()` so other participants' webhooks never mutate
+  state.
+- [x] **`/preauthorisation` page** UI:
+  - Amount input (default 100.00 EUR) + Drop-in card → POSTs to
+    `/api/preauthorisation`. Amount is locked when Drop-in mounts.
+  - Payments table: pspReference (short), amount, status badge,
+    createdAt, per-row "Capture" button (only enabled on
+    `status=AUTHORISED`).
+  - 3-second polling of `/api/payments-list` so the row badge moves
+    `AUTHORISED → CAPTURE_REQUESTED → CAPTURED` automatically as
+    webhooks arrive.
+  - Status badges (`status-authorised`/`-pending`/`-success`/`-fail`/`-neutral`)
+    in `application.css`.
+
+**Verification (done):**
+1. `GET /api/payments-list` returns `[]` at startup. ✅
+2. `POST /api/capture` without body → HTTP 400. ✅
+3. `POST /api/capture` with unknown pspRef → HTTP 404. ✅
+4. `POST /api/preauthorisation` without amount → HTTP 400. ✅
+5. Server log shows `PaymentStore: no existing build/payments.json` on boot. ✅
+
+**Browser test (your part):**
+- Open `/preauthorisation`.
+- Enter 100.00, Pay with `4917 6100 0000 0000` (3DS2 password `password`).
+- Row appears AUTHORISED. AUTHORISATION webhook arrives in the feed.
+- Click "Capture €100.00" — badge → "Capture pending…".
+- After ~5–10 seconds CAPTURE webhook arrives → badge → "Captured".
+- `build/payments.json` reflects every transition with timestamps.
 
 ### Phase 11c — Adjust + Cancel + Refund (planned)
 

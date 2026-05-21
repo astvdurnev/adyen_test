@@ -3,6 +3,7 @@ package com.adyen.workshop.configurations;
 import com.adyen.Client;
 import com.adyen.Config;
 import com.adyen.enums.Environment;
+import com.adyen.service.checkout.ModificationsApi;
 import com.adyen.service.checkout.PaymentsApi;
 import com.adyen.service.checkout.RecurringApi;
 import com.adyen.util.HMACValidator;
@@ -80,6 +81,17 @@ public class DependencyInjectionConfiguration {
         // Shares the same Client bean as PaymentsApi — the SDK is fine with
         // multiple service classes pointing at one HTTP client.
         return new RecurringApi(client());
+    }
+
+    /**
+     * Typed wrapper around the Checkout Modifications API
+     * (POST /payments/{pspRef}/captures, /cancels, /refunds, /amountUpdates).
+     * Used in Module 3 from Phase 11b onwards. Adyen docs:
+     * https://docs.adyen.com/online-payments/modify-payments
+     */
+    @Bean
+    ModificationsApi modificationsApi() {
+        return new ModificationsApi(client());
     }
 
     /**

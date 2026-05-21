@@ -3,8 +3,10 @@ package com.adyen.workshop.controllers;
 import com.adyen.model.RequestOptions;
 import com.adyen.model.checkout.*;
 import com.adyen.workshop.configurations.ApplicationConfiguration;
+import com.adyen.workshop.services.PaymentStore;
 import com.adyen.workshop.services.TokenStore;
 import com.adyen.workshop.services.WorkshopInstanceId;
+import com.adyen.service.checkout.ModificationsApi;
 import com.adyen.service.checkout.PaymentsApi;
 import com.adyen.service.checkout.RecurringApi;
 import com.adyen.service.exception.ApiException;
@@ -37,7 +39,13 @@ public class ApiController {
     // is cancelled. Distinct from PaymentsApi because the SDK groups recurring
     // endpoints under a separate service class.
     private final RecurringApi recurringApi;
+    // Module 3 / Phase 11b — wraps /payments/{pspRef}/captures (and later
+    // /cancels, /refunds, /amountUpdates).
+    private final ModificationsApi modificationsApi;
     private final TokenStore tokenStore;
+    // Module 3 / Phase 11b — keeps track of every preauth payment we authored
+    // so the UI table can show its lifecycle.
+    private final PaymentStore paymentStore;
     // Per-participant prefix used for every merchantReference we generate, so the
     // webhook filter (WebhookEventBus / TokenStore) can ignore other people's
     // payments on a shared TEST merchant account.
@@ -46,12 +54,16 @@ public class ApiController {
     public ApiController(ApplicationConfiguration applicationConfiguration,
                          PaymentsApi paymentsApi,
                          RecurringApi recurringApi,
+                         ModificationsApi modificationsApi,
                          TokenStore tokenStore,
+                         PaymentStore paymentStore,
                          WorkshopInstanceId instanceId) {
         this.applicationConfiguration = applicationConfiguration;
         this.paymentsApi = paymentsApi;
         this.recurringApi = recurringApi;
+        this.modificationsApi = modificationsApi;
         this.tokenStore = tokenStore;
+        this.paymentStore = paymentStore;
         this.instanceId = instanceId;
     }
 
@@ -802,5 +814,233 @@ public class ApiController {
         return ResponseEntity.ok(Map.of(
                 "removed", true,
                 "shopperReference", shopperReference));
+    }
+
+    // ========================================================================
+    // === Module 3 / Phase 11b: pre-authorisation + capture ==============
+    // ========================================================================
+
+    /**
+     * POST /api/preauthorisation — authorises a card WITHOUT capturing it.
+     * Workshop module: Module 3 / Phase 11b
+     * Adyen docs:      https://docs.adyen.com/online-payments/adjust-authorisation/adjust-with-preauth/#pre-authorize
+     *                  https://docs.adyen.com/online-payments/capture/?tab=individual_payment_1_2 (manual capture per payment)
+     * What & Why:      A pre-auth is a regular /payments call with
+     *                  `captureDelayHours = -1`. That value disables
+     *                  Adyen's auto-capture for THIS payment only — funds are
+     *                  reserved on the card but not moved. We later call
+     *                  /payments/{pspRef}/captures to actually charge.
+     *
+     *                  Body shape (extends the Drop-in `state.data`):
+     *                  {
+     *                    paymentMethod: { ... encrypted card ... },
+     *                    browserInfo: { ... },
+     *                    amount: { value: <minor units>, currency: "EUR" }
+     *                  }
+     *                  We read the amount from the body so the workshop UI
+     *                  can test adjust flows with different starting amounts.
+     */
+    @PostMapping("/api/preauthorisation")
+    public ResponseEntity<?> preauthorisation(@RequestBody PaymentRequest body)
+            throws IOException {
+        var paymentRequest = new PaymentRequest();
+
+        // === Amount: comes from the UI (default €100.00 enforced client-side). ==
+        // We still validate server-side to avoid weird states (zero or negative
+        // amounts would either fail at Adyen or behave like tokenisation calls).
+        Amount amount = body.getAmount();
+        if (amount == null || amount.getValue() == null || amount.getValue() <= 0L
+                || amount.getCurrency() == null || amount.getCurrency().isBlank()) {
+            log.warn("/api/preauthorisation called without valid amount");
+            return ResponseEntity.badRequest().build();
+        }
+        paymentRequest.setAmount(amount);
+
+        // === Boilerplate / standard fields =====================================
+        paymentRequest.setMerchantAccount(applicationConfiguration.getAdyenMerchantAccount());
+        paymentRequest.setChannel(PaymentRequest.ChannelEnum.WEB);
+        paymentRequest.setCountryCode("NL");
+        paymentRequest.setPaymentMethod(body.getPaymentMethod());
+
+        var orderRef = instanceId.newReference();
+        paymentRequest.setReference(orderRef);
+        paymentRequest.setReturnUrl("http://localhost:8080/handleShopperRedirect");
+
+        // === THE pre-auth flag =================================================
+        // additionalData.manualCapture = "true" overrides the merchant account's
+        // default capture behaviour FOR THIS PAYMENT ONLY: funds are reserved
+        // but Adyen will NOT auto-capture them — we have to POST /captures
+        // explicitly. This is the per-payment way of enabling manual capture,
+        // documented at:
+        // https://docs.adyen.com/online-payments/capture/?tab=individual_payment_1_2#enable-manual-capture
+        //
+        // (NOTE: an earlier version of this code used captureDelayHours=-1.
+        //  That value is REJECTED by the API with errorCode 164
+        //  "Auto-capture delay invalid or out of range". captureDelayHours is
+        //  only for delayed AUTOMATIC capture, not for switching to manual.)
+        paymentRequest.putAdditionalDataItem("manualCapture", "true");
+
+        // === 3DS2 (Native preferred, same as regular /payments) ================
+        // Pre-auth is shopper-present, so we run full SCA. The card is verified
+        // for the FULL amount; subsequent adjust/capture calls don't re-trigger
+        // 3DS2 because they're merchant-initiated modifications, not new auths.
+        var authenticationData = new AuthenticationData();
+        authenticationData.setAttemptAuthentication(AuthenticationData.AttemptAuthenticationEnum.ALWAYS);
+        authenticationData.setThreeDSRequestData(
+                new ThreeDSRequestData().nativeThreeDS(ThreeDSRequestData.NativeThreeDSEnum.PREFERRED));
+        paymentRequest.setAuthenticationData(authenticationData);
+
+        paymentRequest.setOrigin("http://localhost:8080");
+        paymentRequest.setBrowserInfo(body.getBrowserInfo());
+        paymentRequest.setShopperIP("192.168.0.1");
+        paymentRequest.setShopperInteraction(PaymentRequest.ShopperInteractionEnum.ECOMMERCE);
+
+        var billingAddress = new BillingAddress();
+        billingAddress.setCity("Amsterdam");
+        billingAddress.setCountry("NL");
+        billingAddress.setPostalCode("1012KK");
+        billingAddress.setStreet("Rokin");
+        billingAddress.setHouseNumberOrName("49");
+        paymentRequest.setBillingAddress(billingAddress);
+
+        var requestOptions = new RequestOptions();
+        requestOptions.setIdempotencyKey(UUID.randomUUID().toString());
+
+        log.info("Sending pre-auth /payments: reference={} amount={} {}",
+                orderRef, amount.getValue(), amount.getCurrency());
+        PaymentResponse response;
+        try {
+            response = paymentsApi.payments(paymentRequest, requestOptions);
+        } catch (ApiException e) {
+            // Adyen rejected the request (validation, auth, etc.). Forward
+            // errorCode + message so the UI can render a useful error rather
+            // than a generic "Unknown error" from Drop-in's onError handler.
+            log.warn("Pre-auth /payments failed: status={} errorCode={} message={}",
+                    e.getStatusCode(),
+                    e.getError() != null ? e.getError().getErrorCode() : null,
+                    e.getError() != null ? e.getError().getMessage() : e.getMessage());
+            return ResponseEntity.status(e.getStatusCode() > 0 ? e.getStatusCode() : 500).body(Map.of(
+                    "error", "adyen_api_error",
+                    "errorCode", e.getError() != null ? e.getError().getErrorCode() : "unknown",
+                    "message", e.getError() != null ? e.getError().getMessage() : e.getMessage()
+            ));
+        }
+        log.info("Pre-auth response: reference={} resultCode={} pspReference={}",
+                orderRef, response.getResultCode(), response.getPspReference());
+
+        // === Persist locally so the UI can show the row immediately ============
+        // We only create a record when Adyen returned a pspReference and the
+        // outcome is Authorised. Other outcomes (Refused, IdentifyShopper, ...)
+        // either won't go through or will be finalised via /payments/details.
+        if (response.getPspReference() != null
+                && response.getResultCode() == PaymentResponse.ResultCodeEnum.AUTHORISED) {
+            String brand = null;
+            if (response.getAdditionalData() != null) {
+                brand = response.getAdditionalData().get("paymentMethod");
+            }
+            paymentStore.create(
+                    response.getPspReference(),
+                    orderRef,
+                    amount.getValue(),
+                    amount.getCurrency(),
+                    brand);
+        }
+
+        return ResponseEntity.ok().body(response);
+    }
+
+    /**
+     * POST /api/capture — captures (charges) a previously authorised payment.
+     * Workshop module: Module 3 / Phase 11b
+     * Adyen docs:      https://docs.adyen.com/online-payments/capture/
+     *                  https://docs.adyen.com/api-explorer/Checkout/latest/post/payments/(paymentPspReference)/captures
+     * What & Why:      Asynchronous. We POST /captures, Adyen returns
+     *                  `status=received` + a NEW pspReference for THIS modification.
+     *                  The original payment's pspReference is what we look up
+     *                  locally. The actual CAPTURE outcome arrives via webhook
+     *                  later; we mark the row as CAPTURE_REQUESTED in the
+     *                  meantime so the UI shows it's in flight.
+     *
+     *                  Body shape: { "pspReference": "<original auth>", "amount": { value, currency }? }
+     *                  If amount is omitted we capture the full authorised amount.
+     */
+    @PostMapping("/api/capture")
+    public ResponseEntity<Map<String, Object>> capture(@RequestBody Map<String, Object> body)
+            throws IOException {
+        String pspReference = body.get("pspReference") instanceof String s ? s : null;
+        if (pspReference == null || pspReference.isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of("error", "missing pspReference"));
+        }
+
+        PaymentStore.PaymentRecord existing = paymentStore.get(pspReference);
+        if (existing == null) {
+            return ResponseEntity.status(404).body(Map.of(
+                    "error", "no stored payment for this pspReference",
+                    "pspReference", pspReference));
+        }
+
+        // Default: capture the full authorised amount. The body can override for
+        // partial captures, but the workshop UI doesn't expose that today.
+        long captureValue = existing.amountValue();
+        String captureCurrency = existing.amountCurrency();
+        Object amountObj = body.get("amount");
+        if (amountObj instanceof Map<?, ?> amountMap) {
+            Object v = amountMap.get("value");
+            Object c = amountMap.get("currency");
+            if (v instanceof Number n) captureValue = n.longValue();
+            if (c instanceof String s) captureCurrency = s;
+        }
+
+        var captureRequest = new PaymentCaptureRequest()
+                .merchantAccount(applicationConfiguration.getAdyenMerchantAccount())
+                .amount(new Amount().value(captureValue).currency(captureCurrency))
+                .reference(instanceId.newReference());
+
+        var requestOptions = new RequestOptions();
+        requestOptions.setIdempotencyKey(UUID.randomUUID().toString());
+
+        log.info("Capture request: original pspReference={} amount={} {}",
+                pspReference, captureValue, captureCurrency);
+        com.adyen.model.checkout.PaymentCaptureResponse response;
+        try {
+            response = modificationsApi.captureAuthorisedPayment(pspReference, captureRequest, requestOptions);
+        } catch (ApiException e) {
+            log.warn("Capture /captures failed for pspReference={}: status={} errorCode={} message={}",
+                    pspReference, e.getStatusCode(),
+                    e.getError() != null ? e.getError().getErrorCode() : null,
+                    e.getError() != null ? e.getError().getMessage() : e.getMessage());
+            return ResponseEntity.status(e.getStatusCode() > 0 ? e.getStatusCode() : 500).body(Map.of(
+                    "error", "adyen_api_error",
+                    "errorCode", e.getError() != null ? e.getError().getErrorCode() : "unknown",
+                    "message", e.getError() != null ? e.getError().getMessage() : e.getMessage()
+            ));
+        }
+        log.info("Capture response: status={} modification pspReference={}",
+                response.getStatus(), response.getPspReference());
+
+        // Mark local state as "in flight". The CAPTURE webhook will move us to
+        // CAPTURED or CAPTURE_FAILED.
+        paymentStore.transition(pspReference,
+                PaymentStore.Status.CAPTURE_REQUESTED,
+                "API /captures",
+                "Capture posted to Adyen, awaiting webhook");
+
+        Map<String, Object> body2 = new LinkedHashMap<>();
+        body2.put("status", response.getStatus() != null ? response.getStatus().getValue() : null);
+        body2.put("pspReference", response.getPspReference());
+        body2.put("originalPspReference", pspReference);
+        return ResponseEntity.ok(body2);
+    }
+
+    /**
+     * GET /api/payments-list — snapshot of every stored pre-auth payment.
+     * Workshop module: Module 3 / Phase 11b
+     * What & Why:      The /preauthorisation page polls this every 3 seconds
+     *                  to refresh the payments table after webhooks update
+     *                  state in the background.
+     */
+    @GetMapping("/api/payments-list")
+    public ResponseEntity<List<PaymentStore.PaymentRecord>> paymentsList() {
+        return ResponseEntity.ok(paymentStore.snapshot());
     }
 }
