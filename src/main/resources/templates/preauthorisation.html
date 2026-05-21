@@ -1,0 +1,84 @@
+<!--
+  preauthorisation.html
+  Workshop module: Module 3 / Phase 11a
+  Adyen docs:      https://docs.adyen.com/online-payments/adjust-authorisation/adjust-with-preauth/
+  What & Why:      Entry page for the pre-authorisation module.
+                   Phase 11a: only the Live Webhook Feed is wired up (so the
+                   SSE infrastructure can be validated end-to-end by triggering
+                   a normal /checkout payment and watching events flow in).
+                   Phase 11b will add the actual preauth + capture UI in the
+                   top section.
+-->
+<html lang="en"
+      xmlns:th="http://www.thymeleaf.org"
+      xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout"
+      layout:decorate="~{layout}">
+<head>
+    <title>Pre-authorisation</title>
+</head>
+<body>
+<div layout:fragment="content" id="payment-page">
+
+    <!-- Server-rendered values for the JS bootstrap. -->
+    <div id="clientKey" class="hidden" th:text="${clientKey}"></div>
+
+    <div class="preauth-container">
+
+        <h2>Pre-authorisation</h2>
+        <p>
+            This page will host the pre-authorisation flow (authorise →
+            optionally adjust → capture or cancel → refund). Phase 11a is
+            scaffolding only: the section below streams every webhook the
+            server receives, so you can see asynchronous events arrive live.
+        </p>
+
+        <!-- ==============================================================
+             Phase 11b placeholder — actual preauth/capture UI lives here.
+             For now keep an empty card so the page layout already looks
+             right when we plug the real form in.
+             ============================================================== -->
+        <div class="preauth-actions-placeholder">
+            <em>Pre-auth form and modifications table coming in Phase 11b.</em>
+        </div>
+
+        <!-- ==============================================================
+             Live Webhook Feed (Phase 11a)
+             ==============================================================
+             Layout:
+               header row:  title + connection indicator + clear button
+               event list:  newest at the top, click to expand additionalData
+             All wiring lives in /preauthorisationLiveFeed.js (kept separate so
+             we can reuse it on other pages later if needed).
+        -->
+        <div class="webhook-feed">
+            <div class="webhook-feed-header">
+                <h3>Live Webhook Feed</h3>
+                <span class="webhook-feed-filter"
+                      title="Only webhooks whose merchantReference starts with this prefix are shown. Other workshop participants on the same merchant account are filtered out.">
+                    filter:
+                    <code th:text="${instancePrefix} + '-…'"></code>
+                </span>
+                <span id="webhook-feed-status" class="webhook-feed-status webhook-feed-status-idle">
+                    Connecting…
+                </span>
+                <button id="webhook-feed-clear" class="btn-secondary-small">
+                    Clear list
+                </button>
+            </div>
+
+            <!-- Newest events get prepended here by the JS. The empty-state
+                 paragraph is removed once we have something to show. -->
+            <div id="webhook-feed-list" class="webhook-feed-list">
+                <p class="webhook-feed-empty">
+                    No webhooks yet. Trigger a payment on
+                    <a href="/checkout?type=dropin">/checkout</a> or
+                    <a href="/subscription">/subscription</a> and watch them appear here.
+                </p>
+            </div>
+        </div>
+    </div>
+
+    <script type="text/javascript" src="/preauthorisationLiveFeed.js"></script>
+</div>
+</body>
+</html>

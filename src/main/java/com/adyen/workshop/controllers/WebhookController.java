@@ -5,6 +5,8 @@ import com.adyen.model.notification.NotificationRequestItem;
 import com.adyen.util.HMACValidator;
 import com.adyen.workshop.configurations.ApplicationConfiguration;
 import com.adyen.workshop.services.TokenStore;
+import com.adyen.workshop.services.WebhookEventBus;
+import com.adyen.workshop.services.WorkshopInstanceId;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -47,13 +49,25 @@ public class WebhookController {
     // webhooks for zero-auth tokenisation flows (Module 2 / Phase 8).
     private final TokenStore tokenStore;
 
+    // Module 3 / Phase 11a — fan-out hub that streams every accepted webhook
+    // to every open /preauthorisation page via SSE.
+    private final WebhookEventBus eventBus;
+
+    // Per-participant prefix used to ignore other people's webhooks on a shared
+    // TEST merchant account (token capture + live feed both gate on this).
+    private final WorkshopInstanceId instanceId;
+
     @Autowired
     public WebhookController(ApplicationConfiguration applicationConfiguration,
                              HMACValidator hmacValidator,
-                             TokenStore tokenStore) {
+                             TokenStore tokenStore,
+                             WebhookEventBus eventBus,
+                             WorkshopInstanceId instanceId) {
         this.applicationConfiguration = applicationConfiguration;
         this.hmacValidator = hmacValidator;
         this.tokenStore = tokenStore;
+        this.eventBus = eventBus;
+        this.instanceId = instanceId;
     }
 
     /**
@@ -129,6 +143,11 @@ public class WebhookController {
             // (only for successful AUTHORISATION events) and persist via TokenStore.
             maybeStoreSubscriptionToken(item);
 
+            // Module 3 / Phase 11a — broadcast to every open dashboard.
+            // Done AFTER all server-side state mutations (TokenStore, etc.) so
+            // the live feed reflects what the rest of the app already sees.
+            eventBus.publish(item);
+
             // CRITICAL: 202 Accepted with body "[accepted]" is what Adyen expects. The body
             // is informational — only the 2xx status really matters — but matching the
             // documented convention makes debugging in CA "Webhook events" view easier.
@@ -164,6 +183,15 @@ public class WebhookController {
         // Filter to relevant events. CAPTURE / REFUND / CANCELLATION webhooks
         // also exist but never carry recurringDetailReference.
         if (!"AUTHORISATION".equals(item.getEventCode()) || !item.isSuccess()) {
+            return;
+        }
+
+        // Filter to OUR workshop instance — see WorkshopInstanceId comment.
+        // Other participants on a shared TEST account would otherwise pollute
+        // this developer's TokenStore with their tokens.
+        if (!instanceId.isOurs(item.getMerchantReference())) {
+            log.debug("Token capture skipped — merchantReference '{}' not for prefix '{}-'",
+                    item.getMerchantReference(), instanceId.prefix());
             return;
         }
 

@@ -2,6 +2,7 @@ package com.adyen.workshop.controllers.views;
 
 import com.adyen.workshop.configurations.ApplicationConfiguration;
 import com.adyen.workshop.services.TokenStore;
+import com.adyen.workshop.services.WorkshopInstanceId;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Controller;
@@ -26,10 +27,16 @@ public class ViewController {
     // TokenStore is consulted at page-render time so we can show either the
     // Drop-in (no token yet) or the "Charge €5.00" UI (token already saved).
     private final TokenStore tokenStore;
+    // Exposed to the /preauthorisation page so the live-feed badge can show
+    // which merchantReference prefix is being filtered in.
+    private final WorkshopInstanceId instanceId;
 
-    public ViewController(ApplicationConfiguration applicationConfiguration, TokenStore tokenStore) {
+    public ViewController(ApplicationConfiguration applicationConfiguration,
+                          TokenStore tokenStore,
+                          WorkshopInstanceId instanceId) {
         this.applicationConfiguration = applicationConfiguration;
         this.tokenStore = tokenStore;
+        this.instanceId = instanceId;
     }
 
     @GetMapping("/")
@@ -142,5 +149,22 @@ public class ViewController {
         if (token == null) return "—";
         if (token.length() <= 4) return token;
         return "\u2026" + token.substring(token.length() - 4);
+    }
+
+    /**
+     * GET /preauthorisation — entry page for Module 3.
+     * Workshop module: Module 3 / Phase 11a
+     * Adyen docs:      https://docs.adyen.com/online-payments/adjust-authorisation/adjust-with-preauth/
+     * What & Why:      In Phase 11a this page is intentionally minimal — just
+     *                  the Live Webhook Feed block at the bottom — so we can
+     *                  validate the SSE infrastructure before building the
+     *                  preauth/capture UI on top of it in Phase 11b.
+     */
+    @GetMapping("/preauthorisation")
+    public String preauthorisation(Model model) {
+        log.info("Rendering /preauthorisation page");
+        model.addAttribute("clientKey", this.applicationConfiguration.getAdyenClientKey());
+        model.addAttribute("instancePrefix", this.instanceId.prefix());
+        return "preauthorisation";
     }
 }

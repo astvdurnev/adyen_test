@@ -4,6 +4,7 @@ import com.adyen.model.RequestOptions;
 import com.adyen.model.checkout.*;
 import com.adyen.workshop.configurations.ApplicationConfiguration;
 import com.adyen.workshop.services.TokenStore;
+import com.adyen.workshop.services.WorkshopInstanceId;
 import com.adyen.service.checkout.PaymentsApi;
 import com.adyen.service.checkout.RecurringApi;
 import com.adyen.service.exception.ApiException;
@@ -37,15 +38,21 @@ public class ApiController {
     // endpoints under a separate service class.
     private final RecurringApi recurringApi;
     private final TokenStore tokenStore;
+    // Per-participant prefix used for every merchantReference we generate, so the
+    // webhook filter (WebhookEventBus / TokenStore) can ignore other people's
+    // payments on a shared TEST merchant account.
+    private final WorkshopInstanceId instanceId;
 
     public ApiController(ApplicationConfiguration applicationConfiguration,
                          PaymentsApi paymentsApi,
                          RecurringApi recurringApi,
-                         TokenStore tokenStore) {
+                         TokenStore tokenStore,
+                         WorkshopInstanceId instanceId) {
         this.applicationConfiguration = applicationConfiguration;
         this.paymentsApi = paymentsApi;
         this.recurringApi = recurringApi;
         this.tokenStore = tokenStore;
+        this.instanceId = instanceId;
     }
 
     // Step 0
@@ -171,8 +178,10 @@ public class ApiController {
 
         // Merchant reference is OUR id for the order. It appears in the Customer Area,
         // in webhooks, and in reconciliation files. Must be unique per attempt.
-        // For the workshop a random UUID is fine; in production this would be the order id.
-        var orderRef = UUID.randomUUID().toString();
+        // WorkshopInstanceId.newReference() prefixes a per-participant tag (e.g.
+        // "wshop-viktordurnev-…") so the live webhook feed can ignore other people's
+        // payments on a shared TEST merchant account.
+        var orderRef = instanceId.newReference();
         paymentRequest.setReference(orderRef);
 
         // returnUrl is where Adyen redirects the shopper after an off-site step
@@ -464,7 +473,8 @@ public class ApiController {
         // Encrypted card data from the Drop-in (same as /api/payments).
         paymentRequest.setPaymentMethod(body.getPaymentMethod());
 
-        var orderRef = UUID.randomUUID().toString();
+        // Per-participant prefixed reference (see /api/payments comment for why).
+        var orderRef = instanceId.newReference();
         paymentRequest.setReference(orderRef);
         paymentRequest.setReturnUrl("http://localhost:8080/handleShopperRedirect");
 
@@ -666,7 +676,8 @@ public class ApiController {
         paymentRequest.setAmount(amount);
 
         paymentRequest.setMerchantAccount(applicationConfiguration.getAdyenMerchantAccount());
-        paymentRequest.setReference(UUID.randomUUID().toString());
+        // Per-participant prefixed reference (see /api/payments comment for why).
+        paymentRequest.setReference(instanceId.newReference());
 
         // === The stored payment method ==========================================
         // CardDetails is a polymorphic payment-method blob. For a tokenised charge

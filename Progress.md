@@ -378,12 +378,98 @@ Tasks:
 
 ---
 
+## Module 3 — Pre-authorisation (`README_PREAUTHORISATION.md`)
+
+The pre-auth lifecycle is fully asynchronous: every modification (/captures,
+/cancels, /refunds, /amountUpdates) returns "received" immediately and the
+real outcome arrives later as a webhook. To make this tangible, we built a
+live webhook feed FIRST (Phase 11a) so subsequent phases can demonstrate
+flows visually as they happen.
+
+### Phase 11a — Live Webhook Feed (SSE) ✅
+
+**Goal:** every accepted webhook is streamed to /preauthorisation in real
+time. Multi-participant TEST accounts are handled by tagging every
+merchantReference we generate with a per-OS-user prefix and filtering
+incoming webhooks against it.
+
+Tasks:
+- [x] **`WorkshopInstanceId`** service — derives prefix `wshop-<user>` from
+  `System.getProperty("user.name")`; overridable via `WORKSHOP_INSTANCE_ID`
+  env var.
+- [x] **`WebhookEventBus`** service — `CopyOnWriteArrayList<SseEmitter>` +
+  50-event ring buffer. `publish(item)` filters by `instanceId.isOurs()`
+  before fan-out; `register()` returns a 10-min `SseEmitter` with onError /
+  onTimeout / onCompletion cleanup; sends an initial `connected` hello with
+  the prefix so the UI can show what's being filtered.
+- [x] **`WebhookController`** calls `eventBus.publish(item)` after HMAC
+  validation; `maybeStoreSubscriptionToken()` also gates on
+  `instanceId.isOurs()` so other people's tokens never land in our
+  TokenStore.
+- [x] **`WebhookStreamController`**: `GET /api/webhooks/stream`
+  (text/event-stream) returns an SseEmitter; `GET /api/webhooks/recent`
+  returns the buffer snapshot as JSON.
+- [x] **All `setReference(...)` calls** in `ApiController` now use
+  `instanceId.newReference()` (was raw `UUID.randomUUID()`). This keeps the
+  prefix consistent for `/api/payments`, `/api/subscription-create`, and
+  `/api/subscription-payment`.
+- [x] **`/preauthorisation` page** (Phase 11a scaffold): empty preauth
+  placeholder + live feed card. Header shows the active prefix.
+  `static/preauthorisationLiveFeed.js`: loads `/recent`, opens EventSource,
+  renders newest-first cards with click-to-expand JSON, "Clear list"
+  button, status badge (Connecting / Live / Reconnecting / Disconnected).
+- [x] **`index.html`** now lists Start shopping / Subscribe / Pre-authorise
+  as three entries.
+
+**Verification (done):**
+1. Compile + DevTools restart: log shows `WorkshopInstanceId: derived prefix
+   'wshop-viktordurnev' from OS user 'viktordurnev'`. ✅
+2. `GET /preauthorisation` returns HTTP 200 with prefix rendered as `<code>`
+   in the feed header. ✅
+3. `curl -N /api/webhooks/stream` immediately emits `event: connected` with
+   `instancePrefix`. ✅
+4. Injected two HMAC-signed test webhooks (one with our prefix, one with
+   `other-team-…`). Both got HTTP 202 (Adyen-compatible), but only ours
+   appears in `/api/webhooks/recent`. ✅
+
+**Browser test (your part):**
+- Open `/preauthorisation` in one tab.
+- In another tab, complete a payment on `/checkout?type=dropin` or
+  `/subscription`.
+- AUTHORISATION webhook arrives → a green card slides into the feed with a
+  flash animation; click it to expand `additionalData`.
+
+---
+
+### Phase 11b — Pre-auth + Capture (planned)
+
+- `PaymentStore` service (mirrors `TokenStore`) with `build/payments.json`,
+  tracking `pspReference → { merchantReference, amount, currency, status,
+  history[] }`.
+- `POST /api/preauthorisation` — `/payments` with `captureDelayHours = -1`
+  (per-payment manual capture) + custom amount from the UI.
+- `POST /api/capture` — `paymentsApi.captureAuthorisedPayment(pspRef, ...)`.
+- WebhookController updates `PaymentStore.status` on AUTHORISATION /
+  CAPTURE / CAPTURE_FAILED.
+- UI: amount input + Drop-in for new preauths, table of existing payments
+  with per-row "Capture" button.
+
+### Phase 11c — Adjust + Cancel + Refund (planned)
+
+- `POST /api/modify-amount` — `updateAuthorisedAmount`.
+- `POST /api/cancel` — `cancelAuthorisedPaymentByPspReference`.
+- `POST /api/refund` — `refundCapturedPayment`.
+- Webhooks: AUTHORISATION_ADJUSTMENT, CANCELLATION, TECHNICAL_CANCEL,
+  REFUND, REFUND_FAILED, REFUNDED_REVERSED.
+
+---
+
 ## Out of scope (for now)
 
-- Preauthorisation module (`README_PREAUTHORISATION.md`)
-- Production environment / live keys
-- Scheduled monthly billing (would need a Spring `@Scheduled` job — easy to add on
-  top of Phase 9, but not required by the workshop)
+- Production environment / live keys.
+- Scheduled monthly billing (would need a Spring `@Scheduled` job — easy to
+  add on top of Phase 9, but not required by the workshop).
+- Multi-token-per-shopper (current TokenStore is 1:1).
 
 ---
 
