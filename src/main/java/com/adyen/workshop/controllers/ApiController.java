@@ -3,6 +3,7 @@ package com.adyen.workshop.controllers;
 import com.adyen.model.RequestOptions;
 import com.adyen.model.checkout.*;
 import com.adyen.workshop.configurations.ApplicationConfiguration;
+import com.adyen.workshop.services.TokenStore;
 import com.adyen.service.checkout.PaymentsApi;
 import com.adyen.service.exception.ApiException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -28,10 +29,14 @@ public class ApiController {
 
     private final ApplicationConfiguration applicationConfiguration;
     private final PaymentsApi paymentsApi;
+    private final TokenStore tokenStore;
 
-    public ApiController(ApplicationConfiguration applicationConfiguration, PaymentsApi paymentsApi) {
+    public ApiController(ApplicationConfiguration applicationConfiguration,
+                         PaymentsApi paymentsApi,
+                         TokenStore tokenStore) {
         this.applicationConfiguration = applicationConfiguration;
         this.paymentsApi = paymentsApi;
+        this.tokenStore = tokenStore;
     }
 
     // Step 0
@@ -400,5 +405,126 @@ public class ApiController {
         // Append the resultCode as a query param so the result page can show a
         // human-readable explanation (e.g. "Reason: REFUSED").
         return new RedirectView(redirectURL + "?reason=" + paymentsDetailsResponse.getResultCode());
+    }
+
+    // ========================================================================
+    // === Module 2 / Phase 8: subscription creation (tokenisation) =========
+    // ========================================================================
+
+    /**
+     * POST /api/subscription-create — performs a zero-amount tokenisation payment.
+     * Workshop module: Module 2 / Phase 8
+     * Adyen docs:      https://docs.adyen.com/online-payments/tokenization/create-a-token/
+     * What & Why:      We send Adyen a "Pay €0 and store this card for future use"
+     *                  request. The shopper authenticates the card via 3DS2 ONCE,
+     *                  and from then on we can charge that card via merchant-initiated
+     *                  /payments calls without their presence (Phase 9).
+     *                  The actual token (`recurringDetailReference`) does NOT come
+     *                  back in this response — it arrives later in the AUTHORISATION
+     *                  webhook (see WebhookController).
+     */
+    @PostMapping("/api/subscription-create")
+    public ResponseEntity<PaymentResponse> subscriptionCreate(@RequestBody PaymentRequest body) throws IOException, ApiException {
+        // The shopperReference is the stable id we use to link tokens to a subscriber.
+        // The frontend passes it in the request body (read from a hidden div on the
+        // subscription page). Refuse if missing — we'd have no way to look up the
+        // resulting token later.
+        // Docs: https://docs.adyen.com/online-payments/tokenization/create-a-token/#shopper-reference
+        if (body.getShopperReference() == null || body.getShopperReference().isBlank()) {
+            log.warn("/api/subscription-create called without shopperReference");
+            return ResponseEntity.badRequest().build();
+        }
+
+        var paymentRequest = new PaymentRequest();
+
+        // === Zero-auth amount ====================================================
+        // amount.value = 0 → Adyen routes this as an "account verification" call to
+        // the card network (no money moves, but the card is verified to be valid
+        // and usable). Most issuers support this; some niche ones don't, in which
+        // case the merchant falls back to charging €0.01 and immediately refunding.
+        // Docs: https://docs.adyen.com/online-payments/tokenization/create-a-token/#zero-auth
+        var amount = new Amount()
+                .currency("EUR")
+                .value(0L);
+        paymentRequest.setAmount(amount);
+
+        paymentRequest.setMerchantAccount(applicationConfiguration.getAdyenMerchantAccount());
+        paymentRequest.setChannel(PaymentRequest.ChannelEnum.WEB);
+        paymentRequest.setCountryCode("NL");
+
+        // Encrypted card data from the Drop-in (same as /api/payments).
+        paymentRequest.setPaymentMethod(body.getPaymentMethod());
+
+        var orderRef = UUID.randomUUID().toString();
+        paymentRequest.setReference(orderRef);
+        paymentRequest.setReturnUrl("http://localhost:8080/handleShopperRedirect");
+
+        // === The three tokenisation flags =======================================
+
+        // (1) Asks Adyen to store the card in its Vault. Without this, the card is
+        // verified by the zero-auth but NOT saved — and the future /payments calls
+        // would have nothing to reference.
+        paymentRequest.setStorePaymentMethod(true);
+
+        // (2) Subscriber identity. Adyen ties the stored card to this id; future
+        // /payments calls that reference it can pay with the saved card.
+        // CRITICAL: this is OUR id (e.g. "user-42"), NOT the shopper's email.
+        // Reusing an email would leak PII across Adyen accounts.
+        paymentRequest.setShopperReference(body.getShopperReference());
+
+        // (3) Tells Adyen what KIND of recurring relationship this is. Affects:
+        //     - PSD2 SCA exemption rules
+        //     - RevenueProtect risk scoring
+        //     - Reporting / reconciliation labels in CA
+        // Other values: CardOnFile (irregular, e.g. one-click), UnscheduledCardOnFile
+        // (irregular & merchant-initiated, e.g. auto-top-up).
+        // Docs: https://docs.adyen.com/online-payments/tokenization/create-a-token/#recurringProcessingModel
+        paymentRequest.setRecurringProcessingModel(PaymentRequest.RecurringProcessingModelEnum.SUBSCRIPTION);
+
+        // === 3DS2 (same as regular /api/payments) ================================
+        // The shopper is present (it's their first interaction), so we go through
+        // full SCA. After this single 3DS2 challenge, charges via the token can use
+        // shopperInteraction=ContAuth — no more challenges.
+        var authenticationData = new AuthenticationData();
+        authenticationData.setAttemptAuthentication(AuthenticationData.AttemptAuthenticationEnum.ALWAYS);
+        authenticationData.setThreeDSRequestData(
+                new ThreeDSRequestData().nativeThreeDS(ThreeDSRequestData.NativeThreeDSEnum.PREFERRED));
+        paymentRequest.setAuthenticationData(authenticationData);
+
+        paymentRequest.setOrigin("http://localhost:8080");
+        paymentRequest.setBrowserInfo(body.getBrowserInfo());
+        paymentRequest.setShopperIP("192.168.0.1");
+        paymentRequest.setShopperInteraction(PaymentRequest.ShopperInteractionEnum.ECOMMERCE);
+
+        var billingAddress = new BillingAddress();
+        billingAddress.setCity("Amsterdam");
+        billingAddress.setCountry("NL");
+        billingAddress.setPostalCode("1012KK");
+        billingAddress.setStreet("Rokin");
+        billingAddress.setHouseNumberOrName("49");
+        paymentRequest.setBillingAddress(billingAddress);
+
+        var requestOptions = new RequestOptions();
+        requestOptions.setIdempotencyKey(UUID.randomUUID().toString());
+
+        log.info("Sending zero-auth /payments for tokenisation: reference={} shopperReference={}",
+                orderRef, body.getShopperReference());
+        var response = paymentsApi.payments(paymentRequest, requestOptions);
+        log.info("Zero-auth response: reference={} resultCode={} pspReference={}",
+                orderRef, response.getResultCode(), response.getPspReference());
+
+        return ResponseEntity.ok().body(response);
+    }
+
+    /**
+     * GET /admin/tokens — debugging view of every stored token.
+     * Workshop module: Module 2 / Phase 8 (bonus)
+     * What & Why:      In production you'd never expose this; here it's the easiest
+     *                  way to "see" the TokenStore from a browser/curl during the
+     *                  workshop. Returns the map verbatim.
+     */
+    @GetMapping("/admin/tokens")
+    public ResponseEntity<Map<String, TokenStore.TokenRecord>> listTokens() {
+        return ResponseEntity.ok(tokenStore.snapshot());
     }
 }

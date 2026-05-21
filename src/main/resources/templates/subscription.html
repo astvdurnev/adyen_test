@@ -1,0 +1,47 @@
+<!--
+  subscription.html
+  Workshop module: Module 2 / Phase 8
+  Adyen docs:      https://docs.adyen.com/online-payments/tokenization/create-a-token/
+  What & Why:      Page where a shopper enters card details to start a recurring
+                   subscription (€5/month "rented headphones"). The actual payment
+                   sent to Adyen is €0 — we authenticate the card via 3DS2 and
+                   ask Adyen to STORE it. Charging happens later (Phase 9).
+-->
+<html lang="en"
+      xmlns:th="http://www.thymeleaf.org"
+      xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout"
+      layout:decorate="~{layout}">
+<head>
+    <title>Subscribe</title>
+</head>
+<body>
+<div layout:fragment="content" id="payment-page">
+    <!--
+      Hidden divs carry server-rendered values into JavaScript.
+      We can't put secrets here, but clientKey is public by design (it only
+      authorises requests from "Allowed origins" configured in CA).
+    -->
+    <div id="clientKey" class="hidden" th:text="${clientKey}"></div>
+    <div id="shopperReference" class="hidden" th:text="${shopperReference}"></div>
+
+    <div class="container">
+        <h2>Rent a pair of headphones — €5/month</h2>
+        <p>
+            We will verify your card now (€0.00). Future monthly charges will be
+            initiated by us using the saved card.
+        </p>
+        <p>
+            <small>Subscriber id: <code th:text="${shopperReference}"></code></small>
+        </p>
+
+        <!-- Drop-in renders here. Same UX as /checkout, just different submit URL. -->
+        <div class="payment-container">
+            <div id="payment" class="payment"></div>
+        </div>
+    </div>
+
+    <!-- Phase 8 frontend logic — initialises Drop-in and posts to /api/subscription-create. -->
+    <script type="text/javascript" src="/subscriptionWebImplementation.js"></script>
+</div>
+</body>
+</html>

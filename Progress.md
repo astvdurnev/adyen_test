@@ -222,11 +222,118 @@ Klarna via curl produces a valid `RedirectShopper` response (no validation error
 
 ---
 
+---
+
+# Module 2 — Tokenization (Subscriptions)
+
+Briefing (from `README_TOKENIZATION.md`): the store pivots from one-shot sales to
+subscriptions: rent the headphones for **€5 / month**. We need to tokenise the
+shopper's card via a zero-auth payment, store the returned `recurringDetailReference`,
+and later charge €5 with merchant-initiated (`ContAuth`) payments. The shopper can
+cancel anytime, which deletes the token from Adyen Vault.
+
+Adyen concepts in play:
+- `storePaymentMethod = true` — flag on the first /payments call that asks Adyen to
+  vault the card.
+- `recurringProcessingModel = Subscription` — fixed amount, fixed interval (our model).
+- `shopperInteraction = Ecommerce` (first tokenisation, shopper-present) vs
+  `ContAuth` (subsequent charges, merchant-initiated).
+- `shopperReference` — our stable id for the shopper, links them to all their stored
+  tokens in the Adyen Vault. Generated server-side as a UUID per "subscriber".
+
+Architecture choices (agreed with user):
+- **Token storage:** `build/tokens.json` on disk (`ConcurrentHashMap` mirror in memory,
+  flushed on every mutation). Survives restarts; gitignored via the existing `build/`
+  rule. In production this would be a relational table.
+- **UI:** dedicated `/subscription?type=dropin` page (separate template + JS file from
+  the existing `/checkout`) — cleaner mental model for teaching.
+- **Recurring model:** `Subscription` only (as in README); other modes can be added
+  later by branching the request.
+
+---
+
+## Phase 8 — Subscription create + token capture
+
+**Goal:** the shopper visits a subscription page, completes a €0 zero-auth payment;
+Adyen sends an AUTHORISATION webhook containing the `recurringDetailReference`; the
+server stores it under the shopper's reference.
+
+Tasks:
+- [ ] **TokenStore** Spring service backed by `build/tokens.json`
+  - `Map<shopperReference, TokenRecord>` where `TokenRecord` has `token`, `brand`,
+    `recurringProcessingModel`, `createdAt`
+  - Atomic save (write to `.tmp` then rename)
+  - Load on `@PostConstruct`
+- [ ] **`POST /api/subscription-create`** in `ApiController`
+  - Body: same as `/api/payments` (payment method data) + `shopperReference`
+  - Builds a PaymentRequest with: amount=0 EUR, `storePaymentMethod=true`,
+    `recurringProcessingModel=Subscription`, `shopperInteraction=Ecommerce`,
+    `shopperReference`, plus all the 3DS2 / risk fields we already use.
+- [ ] **Extend `WebhookController`** to capture tokens
+  - On AUTHORISATION with `success=true`, read `additionalData.recurring.recurringDetailReference`
+    and `additionalData.recurring.shopperReference`, push into TokenStore.
+- [ ] **Frontend** — new page
+  - `GET /subscription` route in `ViewController`
+  - `templates/subscription.html` (clones checkout.html, button reads "Subscribe")
+  - `static/subscriptionWebImplementation.js` (clones the checkout JS but POSTs to
+    `/api/subscription-create`, no LineItems on the request)
+
+**Verification:**
+1. `curl GET /admin/tokens` (TBD) returns an empty map at startup.
+2. Pay €0 zero-auth via the new page with a card that supports tokenisation
+   (e.g. Visa `4111 1111 1111 1111` is fine on TEST).
+3. AUTHORISATION webhook arrives → server log shows `Stored token for shopper {ref}: {token}`.
+4. `build/tokens.json` on disk now contains the entry.
+
+---
+
+## Phase 9 — Charge the subscription
+
+**Goal:** trigger a €5 merchant-initiated payment using the stored token, no shopper
+interaction needed.
+
+Tasks:
+- [ ] **`POST /api/subscription-payment`** in `ApiController`
+  - Body: `{ "shopperReference": "..." }`
+  - Look up token in TokenStore → 404 if missing.
+  - Build PaymentRequest: amount=500 EUR (€5), `paymentMethod={ storedPaymentMethodId: <token> }`,
+    `shopperReference`, `shopperInteraction=ContAuth`, `recurringProcessingModel=Subscription`.
+- [ ] **(Bonus)** `GET /admin/tokens` — list of stored tokens for debugging.
+
+**Verification:**
+1. After Phase 8, `curl POST /api/subscription-payment -d '{"shopperReference":"foo"}'`
+   returns `Authorised` with a new pspReference.
+2. New AUTHORISATION webhook arrives for the €5 charge.
+3. Calling the endpoint with an unknown `shopperReference` returns 404.
+
+---
+
+## Phase 10 — Cancel the subscription
+
+**Goal:** remove the token from both the Adyen Vault and our local store.
+
+Tasks:
+- [ ] **`POST /api/subscriptions-cancel`** in `ApiController`
+  - Body: `{ "shopperReference": "..." }`
+  - Look up token → 404 if missing.
+  - Call Adyen `DELETE /storedPaymentMethods/{tokenId}?shopperReference=...&merchantAccount=...`
+    via the Java library's `RecurringApi` (or low-level resource if needed).
+  - Remove from local TokenStore on success.
+
+**Verification:**
+1. Cancel removes the entry from `tokens.json`.
+2. Following `subscription-payment` for the same `shopperReference` → 404 / Adyen
+   "stored method not found".
+3. Token disappears from CA → Customers → Stored Payment Methods.
+
+---
+
 ## Out of scope (for now)
 
-- Tokenization module (`README_TOKENIZATION.md`)
 - Preauthorisation module (`README_PREAUTHORISATION.md`)
 - Production environment / live keys
+- Scheduled monthly billing (would need a Spring `@Scheduled` job — easy to add on
+  top of Phase 9, but not required by the workshop)
 
 ---
 

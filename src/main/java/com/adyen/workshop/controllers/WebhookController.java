@@ -4,6 +4,7 @@ import com.adyen.model.notification.NotificationRequest;
 import com.adyen.model.notification.NotificationRequestItem;
 import com.adyen.util.HMACValidator;
 import com.adyen.workshop.configurations.ApplicationConfiguration;
+import com.adyen.workshop.services.TokenStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -13,6 +14,8 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.security.SignatureException;
+import java.time.Instant;
+import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -40,10 +43,17 @@ public class WebhookController {
     // Docs: https://docs.adyen.com/development-resources/webhooks/verify-hmac-signatures/
     private final HMACValidator hmacValidator;
 
+    // Used to persist `recurringDetailReference` tokens that arrive in AUTHORISATION
+    // webhooks for zero-auth tokenisation flows (Module 2 / Phase 8).
+    private final TokenStore tokenStore;
+
     @Autowired
-    public WebhookController(ApplicationConfiguration applicationConfiguration, HMACValidator hmacValidator) {
+    public WebhookController(ApplicationConfiguration applicationConfiguration,
+                             HMACValidator hmacValidator,
+                             TokenStore tokenStore) {
         this.applicationConfiguration = applicationConfiguration;
         this.hmacValidator = hmacValidator;
+        this.tokenStore = tokenStore;
     }
 
     /**
@@ -113,6 +123,12 @@ public class WebhookController {
                     item.getAmount() != null ? item.getAmount().getValue() : null,
                     item.getAmount() != null ? item.getAmount().getCurrency() : null);
 
+            // Module 2 / Phase 8 — capture tokenisation result.
+            // After a successful zero-auth payment with storePaymentMethod=true,
+            // Adyen sends back the token in additionalData. We extract it here
+            // (only for successful AUTHORISATION events) and persist via TokenStore.
+            maybeStoreSubscriptionToken(item);
+
             // CRITICAL: 202 Accepted with body "[accepted]" is what Adyen expects. The body
             // is informational — only the 2xx status really matters — but matching the
             // documented convention makes debugging in CA "Webhook events" view easier.
@@ -129,5 +145,54 @@ public class WebhookController {
             log.error("Unexpected error processing webhook", e);
             return ResponseEntity.status(500).build();
         }
+    }
+
+    /**
+     * Extract `recurringDetailReference` (the token) from an AUTHORISATION webhook
+     * and persist it via TokenStore.
+     * Workshop module: Module 2 / Phase 8
+     * Adyen docs:      https://docs.adyen.com/online-payments/tokenization/create-a-token/#receive-token
+     * What & Why:      Adyen returns the token AFTER the synchronous /payments
+     *                  response, via a webhook. additionalData carries:
+     *                    - recurring.recurringDetailReference: the token itself
+     *                    - recurring.shopperReference:         our shopper id
+     *                    - paymentMethod:                       brand (visa, mc, ...)
+     *                  Only successful AUTHORISATION events carry a token; other
+     *                  event codes are ignored here.
+     */
+    private void maybeStoreSubscriptionToken(NotificationRequestItem item) {
+        // Filter to relevant events. CAPTURE / REFUND / CANCELLATION webhooks
+        // also exist but never carry recurringDetailReference.
+        if (!"AUTHORISATION".equals(item.getEventCode()) || !item.isSuccess()) {
+            return;
+        }
+
+        Map<String, String> additionalData = item.getAdditionalData();
+        if (additionalData == null) {
+            return;
+        }
+
+        // Adyen uses dotted keys inside the flat additionalData map.
+        // Docs: https://docs.adyen.com/development-resources/webhooks/additional-settings/#recurring
+        String token = additionalData.get("recurring.recurringDetailReference");
+        String shopperRef = additionalData.get("recurring.shopperReference");
+
+        if (token == null || shopperRef == null) {
+            // Not a tokenisation event (regular one-off payment, or storePaymentMethod
+            // wasn't true on the original /payments call). That's normal — just log
+            // at DEBUG level so it doesn't spam the console.
+            log.debug("AUTHORISATION webhook without recurring detail (regular payment) pspReference={}",
+                    item.getPspReference());
+            return;
+        }
+
+        // Brand is useful for UI ("Visa ending in 1111") but optional.
+        String brand = additionalData.get("paymentMethod");
+
+        tokenStore.save(shopperRef, new TokenStore.TokenRecord(
+                token,
+                brand,
+                "Subscription",   // Phase 8 only uses Subscription model
+                Instant.now()));
     }
 }

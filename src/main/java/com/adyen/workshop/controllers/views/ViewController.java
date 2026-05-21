@@ -49,4 +49,24 @@ public class ViewController {
         model.addAttribute("clientKey", this.applicationConfiguration.getAdyenClientKey());
         return "redirect";
     }
+
+    /**
+     * GET /subscription — renders the page where a shopper subscribes
+     * to a recurring service (Module 2 / Phase 8).
+     *
+     * Optional ?shopperReference= query parameter lets the workshop participant
+     * test multiple "subscribers" from the same browser. Defaults to a stable
+     * value so repeated tests update the same row in the token store instead of
+     * filling it with duplicates.
+     */
+    @GetMapping("/subscription")
+    public String subscription(
+            @RequestParam(name = "shopperReference", required = false, defaultValue = "workshop-shopper-001")
+            String shopperReference,
+            Model model) {
+        log.info("Rendering /subscription page for shopperReference={}", shopperReference);
+        model.addAttribute("clientKey", this.applicationConfiguration.getAdyenClientKey());
+        model.addAttribute("shopperReference", shopperReference);
+        return "subscription";
+    }
 }
