@@ -504,13 +504,102 @@ Tasks:
 - After ~5–10 seconds CAPTURE webhook arrives → badge → "Captured".
 - `build/payments.json` reflects every transition with timestamps.
 
-### Phase 11c — Adjust + Cancel + Refund (planned)
+### Phase 11c — Adjust + Cancel + Refund ✅
 
-- `POST /api/modify-amount` — `updateAuthorisedAmount`.
-- `POST /api/cancel` — `cancelAuthorisedPaymentByPspReference`.
-- `POST /api/refund` — `refundCapturedPayment`.
-- Webhooks: AUTHORISATION_ADJUSTMENT, CANCELLATION, TECHNICAL_CANCEL,
-  REFUND, REFUND_FAILED, REFUNDED_REVERSED.
+**Goal:** complete the pre-auth modification toolkit. Now every action
+described in `README_PREAUTHORISATION.md` is wired end-to-end.
+
+Tasks:
+- [x] `PaymentStore.Status` extended with `CANCEL_FAILED` so we can
+  surface the (rare) case where `CANCELLATION` webhook returns
+  `success=false`.
+- [x] `PaymentStore.updateAmount(...)` — optimistically writes the new
+  total + appends a history entry + marks `ADJUSTED`. The new amount is
+  reflected in the UI immediately; the AUTHORISATION_ADJUSTMENT webhook
+  later confirms it.
+- [x] `POST /api/modify-amount`
+  (`ModificationsApi.updateAuthorisedAmount`). Status-gated to
+  `AUTHORISED` or `ADJUSTED` (can adjust multiple times).
+- [x] `POST /api/cancel`
+  (`ModificationsApi.cancelAuthorisedPaymentByPspReference`).
+  Status-gated to `AUTHORISED` or `ADJUSTED`.
+- [x] `POST /api/refund` (`ModificationsApi.refundCapturedPayment`).
+  Always full-amount; status-gated to `CAPTURED`.
+- [x] `WebhookController.maybeUpdatePaymentState()` extended with:
+  - `AUTHORISATION_ADJUSTMENT` → `ADJUSTED` on success, revert to
+    `AUTHORISED` on failure.
+  - `CANCELLATION` → `CANCELLED` / `CANCEL_FAILED`.
+  - `TECHNICAL_CANCEL` → `CANCELLED` (Adyen-initiated, e.g. auth window
+    expired).
+  - `REFUND` → `REFUNDED` / `REFUND_FAILED`.
+  - `REFUND_FAILED` → `REFUND_FAILED`.
+  - `REFUNDED_REVERSED` → `REFUND_FAILED` (issuer reversed the refund).
+- [x] **`/preauthorisation` UI** — each row now has 4 action buttons
+  (Adjust / Capture / Cancel / Refund) with `ACTIONS_BY_STATUS` matrix
+  mirroring server-side `requireStatus()` gating. Adjust uses a
+  `window.prompt()` for the new amount; Refund is full-only.
+- [x] **Per-page filter for the Live Webhook Feed** — the feed now
+  shows ONLY webhooks whose `pspReference` or top-level
+  `originalReference` is a payment authored on `/preauthorisation`,
+  read from `window.preauthKnownPsps` (populated by the polling loop).
+  Buffer of pending events handles the race when an AUTHORISATION
+  webhook arrives before the first `/api/payments-list` poll completes.
+
+### Phase 11d — Save card during preauth ✅
+
+**Goal:** add a shopper-facing "Save card for future payments"
+checkbox on `/preauthorisation`. When ticked, the card is tokenised
+and stored in the same `TokenStore` used by Module 2.
+
+Tasks:
+- [x] `ApplicationConfiguration.ADYEN_SHOPPER_REFERENCE` env var
+  (default `workshop-shopper-001`).
+- [x] `ViewController.preauthorisation()` exposes the shopper id to
+  the template.
+- [x] `preauthorisation.html` hidden `<div id="shopperReference">`.
+- [x] `preauthorisationCheckout.js` — `card.enableStoreDetails: true`
+  in Drop-in config; when shopper ticks the box Drop-in includes
+  `storePaymentMethod: true` in `state.data`, and we forward
+  `shopperReference` in the request body.
+- [x] `ApiController.preauthorisation()` — when
+  `storePaymentMethod=true` and `shopperReference` are present, adds
+  `setStorePaymentMethod(true)`, `setShopperReference(...)`, and
+  `setRecurringProcessingModel(CARDONFILE)` (CardOnFile because the
+  card is being saved for FUTURE shopper-initiated payments, not for
+  unattended subscription charges).
+- [x] `WebhookController.maybeStoreSubscriptionToken()` now reads
+  `recurringProcessingModel` from webhook `additionalData` so
+  CardOnFile and Subscription tokens are labelled correctly in
+  `TokenStore` (Phase 8 always wrote "Subscription").
+- [x] Workshop note: pre-auth additionally sets
+  `additionalData.authorisationType = "PreAuth"` (user-contributed
+  fix) so the issuer treats the auth as a pre-auth (longer auth
+  window, allowed to /amountUpdates). Without this flag Adyen refuses
+  `AUTHORISATION_ADJUSTMENT` with "Operation not allowed".
+
+### Bugs fixed in passing while validating 11c/11d
+
+- **`TokenStore` couldn't persist** — Jackson serialiser refused
+  `Instant` ("Java 8 date/time type not supported"). `PaymentStore`
+  registered `JavaTimeModule`, `TokenStore` did not. Tokens were
+  captured in memory but never reached `build/tokens.json`. Fixed by
+  adding `.registerModule(new JavaTimeModule())` to `TokenStore`'s
+  ObjectMapper, matching `PaymentStore`'s setup.
+
+- **Modification webhooks didn't transition `PaymentStore`** — the
+  controller looked for `originalReference` inside
+  `additionalData`, but Adyen serialises it at the TOP LEVEL of the
+  `NotificationRequestItem`. As a result CAPTURE / CANCELLATION /
+  REFUND / AUTHORISATION_ADJUSTMENT lookups missed and the UI stayed
+  on `*_REQUESTED` forever. Fixed to use `item.getOriginalReference()`
+  with a fallback to the old additionalData path for synthetic test
+  fixtures.
+
+- **Live Webhook Feed per-page filter missed modification events** —
+  the same bug surfaced in the frontend filter. We now include the
+  top-level `originalReference` in the `WebhookEvent` DTO published to
+  SSE clients, and the JS filter checks it before falling back to
+  `additionalData.originalReference`.
 
 ---
 

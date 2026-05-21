@@ -165,6 +165,11 @@ public class ViewController {
         log.info("Rendering /preauthorisation page");
         model.addAttribute("clientKey", this.applicationConfiguration.getAdyenClientKey());
         model.addAttribute("instancePrefix", this.instanceId.prefix());
+        // Module 3 / Phase 11d — exposes the configured shopper id so the
+        // "Save card for future payments" checkbox knows which Adyen Vault
+        // entry to associate the token with on AUTHORISATION webhook.
+        model.addAttribute("shopperReference",
+                this.applicationConfiguration.getAdyenShopperReference());
         return "preauthorisation";
     }
 }

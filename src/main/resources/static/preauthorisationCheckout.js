@@ -15,6 +15,10 @@
  */
 
 const clientKey = document.getElementById("clientKey").innerHTML;
+// Phase 11d — shopperReference forwarded to the server when the user opts
+// to save the card. Coming from a hidden div populated by Thymeleaf so the
+// JS doesn't need to know how the value is configured (it's an env var).
+const shopperReference = (document.getElementById("shopperReference") || {}).innerHTML || "";
 const { AdyenCheckout, Dropin } = window.AdyenWeb;
 
 // ============================================================================
@@ -102,6 +106,15 @@ async function startPreauthCheckout() {
                             currency: "EUR",
                         },
                     };
+                    // Phase 11d: when the shopper ticked "Save card", the
+                    // Drop-in already set storePaymentMethod=true inside
+                    // state.data. We additionally forward shopperReference
+                    // so the server can attach the token to a customer.
+                    // Adyen docs:
+                    // https://docs.adyen.com/online-payments/tokenization/create-tokens/
+                    if (state.data && state.data.storePaymentMethod === true) {
+                        body.shopperReference = shopperReference;
+                    }
                     const { action, order, resultCode } = await fetch(
                         "/api/preauthorisation",
                         {
@@ -176,6 +189,16 @@ async function startPreauthCheckout() {
                 // body, not this display value. Keep them aligned so the UX
                 // doesn't lie about what's being charged.
                 amount: { value: lockedAmount, currency: "EUR" },
+                // Phase 11d: "Save card for future payments" checkbox.
+                // When ticked, Drop-in adds storePaymentMethod=true to
+                // state.data; the server picks that up and sets
+                // recurringProcessingModel=CardOnFile + shopperReference so
+                // Adyen stores the token in the Vault and emits a
+                // recurringDetailReference on the AUTHORISATION webhook.
+                // Adyen docs:
+                //   https://docs.adyen.com/payment-methods/cards/web-drop-in#optional-configuration
+                //   https://docs.adyen.com/online-payments/tokenization/create-tokens/
+                enableStoreDetails: true,
             },
         };
 
@@ -201,6 +224,7 @@ const STATUS_BADGES = {
     CAPTURE_FAILED:    { label: "Capture failed",     cls: "status-fail" },
     CANCEL_REQUESTED:  { label: "Cancel pending…",    cls: "status-pending" },
     CANCELLED:         { label: "Cancelled",          cls: "status-neutral" },
+    CANCEL_FAILED:     { label: "Cancel failed",      cls: "status-fail" },
     REFUND_REQUESTED:  { label: "Refund pending…",    cls: "status-pending" },
     REFUNDED:          { label: "Refunded",           cls: "status-neutral" },
     REFUND_FAILED:     { label: "Refund failed",      cls: "status-fail" },
@@ -222,6 +246,26 @@ function esc(s) {
         .replace(/'/g, "&#39;");
 }
 
+/**
+ * Action matrix per PaymentStore.Status. Each entry is a flag — the row
+ * renderer enables/disables buttons based on these.
+ * Mirror the server-side `requireStatus()` gating in ApiController so the
+ * UI never shows a button that the API will reject with 409.
+ */
+const ACTIONS_BY_STATUS = {
+    AUTHORISED:        { adjust: true,  capture: true,  cancel: true,  refund: false },
+    ADJUSTED:          { adjust: true,  capture: true,  cancel: true,  refund: false },
+    CAPTURE_REQUESTED: { adjust: false, capture: false, cancel: false, refund: false },
+    CAPTURED:          { adjust: false, capture: false, cancel: false, refund: true  },
+    CAPTURE_FAILED:    { adjust: false, capture: false, cancel: false, refund: false },
+    CANCEL_REQUESTED:  { adjust: false, capture: false, cancel: false, refund: false },
+    CANCELLED:         { adjust: false, capture: false, cancel: false, refund: false },
+    CANCEL_FAILED:     { adjust: false, capture: false, cancel: false, refund: false },
+    REFUND_REQUESTED:  { adjust: false, capture: false, cancel: false, refund: false },
+    REFUNDED:          { adjust: false, capture: false, cancel: false, refund: false },
+    REFUND_FAILED:     { adjust: false, capture: false, cancel: false, refund: false },
+};
+
 /** Re-renders the table from a snapshot. Avoids in-place edits — the dataset
  *  is small enough that a full rebuild keeps the code simple. */
 function renderPaymentsTable(rows) {
@@ -241,89 +285,215 @@ function renderPaymentsTable(rows) {
         const tr = document.createElement("tr");
         tr.setAttribute("data-psp", row.pspReference);
 
-        const captureEnabled = row.status === "AUTHORISED";
+        const allowed = ACTIONS_BY_STATUS[row.status] ||
+            { adjust: false, capture: false, cancel: false, refund: false };
+        const amountStr = fmtAmount(row.amountValue, row.amountCurrency);
+
+        // Button bar. Each button always rendered (so the row layout doesn't
+        // shift as status changes), but disabled when the status doesn't allow
+        // that action. Tooltip hints why each is off.
+        const buttons =
+            '<button class="row-action btn-adjust"  data-action="adjust"'  +
+                (allowed.adjust  ? '' : ' disabled') +
+                ' title="Adjust the authorised amount">Adjust</button>' +
+            '<button class="row-action btn-capture" data-action="capture"' +
+                (allowed.capture ? '' : ' disabled') +
+                ' title="Capture the full authorised amount">Capture ' + esc(amountStr) + '</button>' +
+            '<button class="row-action btn-cancel"  data-action="cancel"'  +
+                (allowed.cancel  ? '' : ' disabled') +
+                ' title="Cancel (void) the authorisation">Cancel</button>' +
+            '<button class="row-action btn-refund"  data-action="refund"'  +
+                (allowed.refund  ? '' : ' disabled') +
+                ' title="Refund the captured amount">Refund</button>';
 
         tr.innerHTML =
             '<td><code title="' + esc(row.pspReference) + '">' +
                 esc(shortPsp(row.pspReference)) + '</code></td>' +
-            '<td>' + esc(fmtAmount(row.amountValue, row.amountCurrency)) + '</td>' +
+            '<td>' + esc(amountStr) + '</td>' +
             '<td>' + statusBadge(row.status) + '</td>' +
             '<td>' + esc(fmtDate(row.createdAt)) + '</td>' +
-            '<td>' +
-                '<button class="row-capture-button btn-primary-small"' +
-                (captureEnabled ? '' : ' disabled') + '>' +
-                    'Capture ' + esc(fmtAmount(row.amountValue, row.amountCurrency)) +
-                '</button>' +
-                '<span class="row-result"></span>' +
+            '<td class="row-actions-cell">' + buttons +
+                '<div class="row-result"></div>' +
             '</td>';
         tbody.appendChild(tr);
     }
-    wireCaptureButtons();
+    wireActionButtons();
 }
 
 /**
- * Captures a payment by pspReference. Updates the row inline; the AUTHORISED →
- * CAPTURE_REQUESTED transition is server-driven, so the next poll will refresh
- * the badge from "Capture pending…" to "Captured" once the webhook arrives.
+ * Calls a modification endpoint and updates the row's status pill.
+ *
+ * @param {object} opts
+ * @param {string} opts.url        endpoint to POST to
+ * @param {object} opts.body       request body
+ * @param {HTMLElement} opts.row   <tr> element
+ * @param {HTMLButtonElement} opts.button button that was clicked
+ * @param {string} opts.busyLabel  what to show on the button while in flight
+ * @param {string} opts.pendingNote message under "row-result" while awaiting webhook
+ * @param {string} opts.errorPrefix label for HTTP failure messages
  */
-async function captureOne(pspReference, row) {
-    const button = row.querySelector(".row-capture-button");
-    const status = row.querySelector(".row-result");
+async function postModification(opts) {
+    const { url, body, row, button, busyLabel, pendingNote, errorPrefix } = opts;
+    const statusEl = row.querySelector(".row-result");
+
+    const previousLabel = button.textContent;
     button.disabled = true;
-    button.textContent = "Capturing…";
-    status.textContent = "";
-    status.className = "row-result";
+    button.textContent = busyLabel;
+    statusEl.textContent = "";
+    statusEl.className = "row-result";
 
     try {
-        const resp = await fetch("/api/capture", {
+        const resp = await fetch(url, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ pspReference }),
+            body: JSON.stringify(body),
         });
         const text = await resp.text();
         let parsed;
         try { parsed = JSON.parse(text); } catch { parsed = { raw: text }; }
 
         if (!resp.ok) {
-            status.textContent = "Capture failed (HTTP " + resp.status + ")";
-            status.className = "row-result row-result-error";
+            const errMsg = parsed.message || parsed.error || ("HTTP " + resp.status);
+            statusEl.textContent = errorPrefix + ": " + errMsg;
+            statusEl.className = "row-result row-result-error";
             button.disabled = false;
+            button.textContent = previousLabel;
             return;
         }
-        status.textContent = parsed.status + " (modification " +
-            shortPsp(parsed.pspReference) + ") — waiting for CAPTURE webhook";
-        status.className = "row-result row-result-pending";
+        statusEl.textContent = parsed.status + " (modification " +
+            shortPsp(parsed.pspReference) + ") — " + pendingNote;
+        statusEl.className = "row-result row-result-pending";
+        // Force an immediate snapshot refresh so the row's status pill updates
+        // to *_REQUESTED right away rather than waiting up to 3 seconds.
+        refreshPaymentsTable();
     } catch (e) {
         console.error(e);
-        status.textContent = "Network error: " + e.message;
-        status.className = "row-result row-result-error";
+        statusEl.textContent = "Network error: " + e.message;
+        statusEl.className = "row-result row-result-error";
         button.disabled = false;
+        button.textContent = previousLabel;
     }
 }
 
-function wireCaptureButtons() {
+function wireActionButtons() {
     document.querySelectorAll("tr[data-psp]").forEach((row) => {
-        const button = row.querySelector(".row-capture-button");
-        if (!button || button.disabled) return;
-        button.addEventListener("click", () => {
-            const psp = row.getAttribute("data-psp");
-            captureOne(psp, row);
+        const psp = row.getAttribute("data-psp");
+        row.querySelectorAll(".row-action").forEach((button) => {
+            if (button.disabled) return;
+            const action = button.getAttribute("data-action");
+            button.addEventListener("click", () => handleAction(action, psp, row, button));
         });
     });
+}
+
+/**
+ * Dispatch table for the four row actions. Each branch knows how to build
+ * its request body and what user-facing copy to show.
+ */
+function handleAction(action, pspReference, row, button) {
+    switch (action) {
+        case "capture":
+            postModification({
+                url: "/api/capture",
+                body: { pspReference },
+                row, button,
+                busyLabel: "Capturing…",
+                pendingNote: "waiting for CAPTURE webhook",
+                errorPrefix: "Capture failed",
+            });
+            return;
+
+        case "cancel":
+            if (!confirm("Cancel this authorisation? Funds will be released.")) return;
+            postModification({
+                url: "/api/cancel",
+                body: { pspReference },
+                row, button,
+                busyLabel: "Cancelling…",
+                pendingNote: "waiting for CANCELLATION webhook",
+                errorPrefix: "Cancel failed",
+            });
+            return;
+
+        case "refund":
+            if (!confirm("Refund the full captured amount?")) return;
+            postModification({
+                url: "/api/refund",
+                body: { pspReference },
+                row, button,
+                busyLabel: "Refunding…",
+                pendingNote: "waiting for REFUND webhook",
+                errorPrefix: "Refund failed",
+            });
+            return;
+
+        case "adjust": {
+            // Prompt for a new total in major units. We default to the
+            // current amount so the typing cost is minimal when the user
+            // just wants to nudge it.
+            const currentRowAmountCell = row.children[1]?.textContent || "";
+            const currentMajor = parseFloat(currentRowAmountCell);
+            const input = prompt(
+                "New total amount (EUR). Enter a value greater than 0.\n" +
+                "Current: " + (isNaN(currentMajor) ? "?" : currentMajor.toFixed(2)),
+                isNaN(currentMajor) ? "1.00" : currentMajor.toFixed(2)
+            );
+            if (input === null) return;
+            const major = parseFloat(input);
+            if (isNaN(major) || major <= 0) {
+                alert("Invalid amount.");
+                return;
+            }
+            const minor = Math.round(major * 100);
+            postModification({
+                url: "/api/modify-amount",
+                body: { pspReference, amount: { value: minor, currency: "EUR" } },
+                row, button,
+                busyLabel: "Adjusting…",
+                pendingNote: "waiting for AUTHORISATION_ADJUSTMENT webhook",
+                errorPrefix: "Adjust failed",
+            });
+            return;
+        }
+    }
 }
 
 // ============================================================================
 // === Polling ==============================================================
 // ============================================================================
 
-/** Fetches the snapshot and re-renders. Errors are swallowed so a transient
- *  network blip doesn't break the page. */
+/**
+ * Set of pspReferences that belong to THIS page. Exported on window so the
+ * live feed (preauthorisationLiveFeed.js) can filter incoming webhooks down
+ * to events relevant to /preauthorisation only. Without this filter the feed
+ * also shows /checkout and /subscription events from the same instance,
+ * which is too noisy when you're focused on the preauth flow.
+ *
+ * The set is the source of truth shared between the polling loop and the
+ * SSE filter, so both stay in sync without explicit cross-component events.
+ */
+window.preauthKnownPsps = window.preauthKnownPsps || new Set();
+window.dispatchEvent(new CustomEvent("preauthKnownPspsReady"));
+
+/** Fetches the snapshot, re-renders, and refreshes the known-pspReferences
+ *  set used by the live feed for filtering. Errors are swallowed so a
+ *  transient network blip doesn't break the page. */
 async function refreshPaymentsTable() {
     try {
         const resp = await fetch("/api/payments-list");
         if (!resp.ok) return;
         const rows = await resp.json();
         renderPaymentsTable(rows);
+
+        // Keep the live feed's filter in sync with what's actually in
+        // PaymentStore. We rebuild the set from scratch because a payment can
+        // never DISAPPEAR from the store; if anything its set is monotonically
+        // growing, but `Set` operations are cheap enough that we don't bother
+        // with deltas.
+        const next = new Set();
+        for (const r of rows || []) next.add(r.pspReference);
+        window.preauthKnownPsps = next;
+        window.dispatchEvent(new CustomEvent("preauthKnownPspsUpdated"));
     } catch (e) {
         console.debug("payments-list refresh failed:", e.message);
     }

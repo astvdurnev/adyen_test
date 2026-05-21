@@ -785,6 +785,68 @@ a:hover {
     font-weight: 600;
 }
 
+.row-actions-cell {
+    min-width: 320px;
+}
+
+.row-action {
+    background: #00112c;
+    border: 1px solid #00112c;
+    border-radius: 4px;
+    color: #fff;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+    margin: 0 4px 4px 0;
+    padding: 5px 10px;
+    transition: background 120ms;
+}
+
+.row-action:hover:not(:disabled) {
+    background: #1a2a4a;
+}
+
+.row-action:disabled {
+    background: #e6e9eb;
+    border-color: #e6e9eb;
+    color: #97a3b3;
+    cursor: not-allowed;
+}
+
+.row-action.btn-capture:not(:disabled) {
+    background: #0abf53;
+    border-color: #0abf53;
+}
+.row-action.btn-capture:hover:not(:disabled) {
+    background: #088a3c;
+}
+
+.row-action.btn-adjust:not(:disabled) {
+    background: #1981f1;
+    border-color: #1981f1;
+}
+.row-action.btn-adjust:hover:not(:disabled) {
+    background: #0c63c2;
+}
+
+.row-action.btn-cancel:not(:disabled),
+.row-action.btn-refund:not(:disabled) {
+    background: #d4351c;
+    border-color: #d4351c;
+}
+.row-action.btn-cancel:hover:not(:disabled),
+.row-action.btn-refund:hover:not(:disabled) {
+    background: #a02a16;
+}
+
+.row-result {
+    color: #687282;
+    display: block;
+    font-size: 12px;
+    margin-top: 4px;
+    min-height: 14px;
+}
+
 /* Live Webhook Feed */
 .webhook-feed {
     background: #fff;

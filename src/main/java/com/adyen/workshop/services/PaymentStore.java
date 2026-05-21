@@ -67,7 +67,7 @@ public class PaymentStore {
     @PostConstruct
     public void loadFromDisk() {
         if (!Files.exists(storeFile)) {
-            log.info("PaymentStore: no existing {} — starting with empty store", storeFile);
+            log.info("PaymentStore: no existing {} on disk — starting with empty store", storeFile);
             return;
         }
         try {
@@ -174,6 +174,42 @@ public class PaymentStore {
     }
 
     /**
+     * Updates the payment's amount AND transitions status to ADJUSTED.
+     * Used by /api/modify-amount in Phase 11c — the new total is written
+     * immediately so the UI shows the adjusted value, and history records
+     * the delta. If Adyen later rejects the adjust via AUTHORISATION_ADJUSTMENT
+     * webhook (success=false), the row gets a CANCEL_FAILED-style note but
+     * we keep the optimistic amount (workshop simplification).
+     */
+    public synchronized PaymentRecord updateAmount(String pspReference,
+                                                   long newValue,
+                                                   String newCurrency,
+                                                   String eventCode,
+                                                   String note) {
+        PaymentRecord existing = payments.get(pspReference);
+        if (existing == null) return null;
+        Instant now = Instant.now();
+        List<HistoryEntry> history = new ArrayList<>(existing.history());
+        history.add(new HistoryEntry(now, eventCode, note, Status.ADJUSTED.name()));
+
+        PaymentRecord updated = new PaymentRecord(
+                existing.pspReference(),
+                existing.merchantReference(),
+                newValue,
+                newCurrency,
+                existing.paymentMethod(),
+                Status.ADJUSTED,
+                existing.createdAt(),
+                now,
+                history);
+        payments.put(pspReference, updated);
+        flush();
+        log.info("PaymentStore: pspReference={} amount {} → {} {} (ADJUSTED)",
+                pspReference, existing.amountValue(), newValue, newCurrency);
+        return updated;
+    }
+
+    /**
      * Snapshot for the UI, newest first. We sort on read because the underlying
      * ConcurrentHashMap doesn't preserve insertion order, and the JSON file
      * shouldn't impose UI ordering choices.
@@ -208,7 +244,9 @@ public class PaymentStore {
      *   CAPTURED          — CAPTURE webhook success=true.
      *   CAPTURE_FAILED    — CAPTURE_FAILED webhook (issuer / bank rejection).
      *   CANCEL_REQUESTED  — /cancels POSTed, awaiting CANCELLATION webhook.
-     *   CANCELLED         — CANCELLATION webhook success=true.
+     *   CANCELLED         — CANCELLATION (or TECHNICAL_CANCEL) success=true.
+     *   CANCEL_FAILED     — CANCELLATION webhook success=false (rare; usually
+     *                       a race vs an already-captured payment).
      *   REFUND_REQUESTED  — /refunds POSTed, awaiting REFUND webhook.
      *   REFUNDED          — REFUND webhook success=true.
      *   REFUND_FAILED     — REFUND_FAILED or REFUNDED_REVERSED webhook.
@@ -221,6 +259,7 @@ public class PaymentStore {
         CAPTURE_FAILED,
         CANCEL_REQUESTED,
         CANCELLED,
+        CANCEL_FAILED,
         REFUND_REQUESTED,
         REFUNDED,
         REFUND_FAILED

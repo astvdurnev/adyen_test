@@ -3,6 +3,7 @@ package com.adyen.workshop.services;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -52,7 +53,14 @@ public class TokenStore {
 
     // Jackson is already on the classpath via spring-boot-starter-web. Reusing one
     // ObjectMapper instance is the standard pattern (it's thread-safe).
+    //
+    // We register JavaTimeModule because TokenRecord.createdAt is an Instant —
+    // by default Jackson refuses to serialise java.time types and throws
+    // InvalidDefinitionException at flush time. Adding the module makes Instant
+    // round-trip as an ISO-8601 string, which is also what PaymentStore does so
+    // the two on-disk JSONs are consistent.
     private final ObjectMapper mapper = new ObjectMapper()
+            .registerModule(new JavaTimeModule())
             .setSerializationInclusion(JsonInclude.Include.NON_NULL);
 
     /**

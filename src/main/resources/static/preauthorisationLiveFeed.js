@@ -23,6 +23,55 @@ const EMPTY_STATE_CLASS = "webhook-feed-empty";
 const MAX_CARDS = 100;
 
 // ============================================================================
+// === Per-page filter =======================================================
+// ============================================================================
+//
+// The server already gates webhooks by WorkshopInstanceId.isOurs() (per
+// participant on a shared TEST merchant account). But on this page we want
+// to narrow further: ONLY webhooks for payments that were authored on
+// /preauthorisation. Otherwise checkout/subscription webhooks from the same
+// instance show up here too, which is noise.
+//
+// We do that on the client side rather than the server, because:
+//   - Server doesn't know which "page" the events belong to.
+//   - The page already has the authoritative list via /api/payments-list, so
+//     we just match webhook pspReference (or additionalData.originalReference
+//     for modifications) against that set.
+//   - preauthorisationCheckout.js exposes window.preauthKnownPsps and fires
+//     a 'preauthKnownPspsUpdated' CustomEvent on every refresh, so we stay
+//     in sync without a second poller here.
+//
+// We also keep a small backlog of events that arrived BEFORE the matching
+// pspReference was known (race: SSE webhook beats /api/payments-list poll).
+// When the set updates we replay the backlog and render anything that now
+// matches.
+
+/** Buffer for events whose pspReference wasn't known yet at arrival time. */
+const pendingEvents = [];
+const PENDING_MAX = 50; // bound memory; older drops silently.
+
+/** Returns true if the event belongs to this page (preauthorisation). */
+function isEventForThisPage(event) {
+    const set = window.preauthKnownPsps;
+    if (!set || set.size === 0) return false;
+
+    // Direct match — for the very first AUTHORISATION webhook the
+    // pspReference IS the original.
+    if (event.pspReference && set.has(event.pspReference)) return true;
+
+    // Modifications (CAPTURE / CANCELLATION / REFUND / AUTHORISATION_ADJUSTMENT)
+    // carry the original payment's psp in the top-level `originalReference`
+    // field. The fallback to additionalData.originalReference is for
+    // backward compatibility with smoke-test fixtures that put it there.
+    // Docs: https://docs.adyen.com/development-resources/webhooks/understand-notifications/#fields
+    if (event.originalReference && set.has(event.originalReference)) return true;
+    const origFallback = event.additionalData && event.additionalData.originalReference;
+    if (origFallback && set.has(origFallback)) return true;
+
+    return false;
+}
+
+// ============================================================================
 // === Connection status indicator ==========================================
 // ============================================================================
 
@@ -91,6 +140,13 @@ function buildCard(event) {
         '<span><strong>amount:</strong> ' + escapeHtml(fmtAmount(event.amountValue, event.amountCurrency)) + '</span>' +
         '<span><strong>method:</strong> ' + escapeHtml(event.paymentMethod || "—") + '</span>' +
         '<span><strong>ref:</strong> <code>' + escapeHtml(event.merchantReference || "—") + '</code></span>' +
+        // originalReference is populated only for modification events (CAPTURE
+        // / CANCELLATION / REFUND / AUTHORISATION_ADJUSTMENT). Showing it makes
+        // it obvious which original auth a modification belongs to without
+        // having to expand the JSON details panel.
+        (event.originalReference
+            ? '<span><strong>original:</strong> <code>' + escapeHtml(event.originalReference) + '</code></span>'
+            : '') +
         (event.reason ? '<span><strong>reason:</strong> ' + escapeHtml(event.reason) + '</span>' : '');
     card.appendChild(summary);
 
@@ -167,7 +223,16 @@ function openStream() {
     eventSource.addEventListener("webhook", (e) => {
         try {
             const event = JSON.parse(e.data);
-            prependCard(event);
+            if (isEventForThisPage(event)) {
+                prependCard(event);
+                return;
+            }
+            // Race: this might be the AUTHORISATION webhook for a preauth we
+            // just created, but the next /api/payments-list poll hasn't
+            // populated the set yet. Stash it so the 'updated' listener can
+            // render it if the set catches up within a second or two.
+            pendingEvents.push(event);
+            while (pendingEvents.length > PENDING_MAX) pendingEvents.shift();
         } catch (err) {
             console.warn("Failed to parse webhook SSE event", err, e.data);
         }
@@ -202,21 +267,54 @@ async function loadRecent() {
         const items = await resp.json();
         if (!Array.isArray(items) || items.length === 0) return;
 
-        // /recent returns newest-first, but prependCard re-prepends, so to
-        // preserve order we render OLDEST first (i.e. iterate reversed).
+        // Apply the same per-page filter as live events. Non-matching items
+        // are stashed in pendingEvents so they can flow in once the
+        // pspReference set catches up (matters on first page load when the
+        // /api/payments-list poll might land AFTER us).
+        const matched = [];
+        for (const ev of items) {
+            if (isEventForThisPage(ev)) {
+                matched.push(ev);
+            } else {
+                pendingEvents.push(ev);
+            }
+        }
+        while (pendingEvents.length > PENDING_MAX) pendingEvents.shift();
+
+        if (matched.length === 0) return;
+
         const list = document.getElementById(FEED_LIST_ID);
         const empty = list && list.querySelector("." + EMPTY_STATE_CLASS);
         if (empty) empty.remove();
 
-        for (let i = items.length - 1; i >= 0; i--) {
-            const card = buildCard(items[i]);
-            // For history we don't run the entrance animation.
+        // /recent returns newest-first, but prependCard re-prepends, so to
+        // preserve order we render OLDEST first (i.e. iterate reversed).
+        for (let i = matched.length - 1; i >= 0; i--) {
+            const card = buildCard(matched[i]);
             list.appendChild(card);
         }
     } catch (err) {
         console.warn("loadRecent failed", err);
     }
 }
+
+// When the pspReference set updates (every 3s after the polling loop in
+// preauthorisationCheckout.js), replay any pending events that now match.
+// Newly matched events are inserted at the top with the usual animation —
+// they really did arrive recently, just before we knew their owner.
+window.addEventListener("preauthKnownPspsUpdated", () => {
+    if (pendingEvents.length === 0) return;
+    const stillPending = [];
+    for (const ev of pendingEvents) {
+        if (isEventForThisPage(ev)) {
+            prependCard(ev);
+        } else {
+            stillPending.push(ev);
+        }
+    }
+    pendingEvents.length = 0;
+    pendingEvents.push(...stillPending);
+});
 
 // ============================================================================
 // === Clear button =========================================================

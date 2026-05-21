@@ -24,6 +24,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -866,20 +867,34 @@ public class ApiController {
         paymentRequest.setReference(orderRef);
         paymentRequest.setReturnUrl("http://localhost:8080/handleShopperRedirect");
 
-        // === THE pre-auth flag =================================================
-        // additionalData.manualCapture = "true" overrides the merchant account's
-        // default capture behaviour FOR THIS PAYMENT ONLY: funds are reserved
-        // but Adyen will NOT auto-capture them — we have to POST /captures
-        // explicitly. This is the per-payment way of enabling manual capture,
-        // documented at:
-        // https://docs.adyen.com/online-payments/capture/?tab=individual_payment_1_2#enable-manual-capture
+        // === THE pre-auth flags ================================================
+        //
+        // additionalData.authorisationType = "PreAuth"
+        //   Tells the card issuer this auth is a PRE-authorisation rather than
+        //   the default FINAL auth. The practical difference:
+        //     - PreAuth grants a much longer auth-hold window (typically up to
+        //       30 days for cards) — important for hotels / car rentals / any
+        //       flow where capture happens days after auth.
+        //     - PreAuth is REQUIRED if we later call /amountUpdates (adjust
+        //       authorisation). Final auth amounts can't be adjusted upward.
+        //   Adyen docs:
+        //     https://docs.adyen.com/online-payments/adjust-authorisation#authorisation-types
+        //     https://docs.adyen.com/online-payments/adjust-authorisation/adjust-with-preauth/
+        //
+        // additionalData.manualCapture = "true"
+        //   Overrides the merchant account's default capture behaviour FOR THIS
+        //   PAYMENT ONLY: funds are reserved but Adyen will NOT auto-capture
+        //   them — we have to POST /captures explicitly. This is the
+        //   per-payment way of enabling manual capture.
+        //   Adyen docs:
+        //     https://docs.adyen.com/online-payments/capture/?tab=individual_payment_1_2#enable-manual-capture
         //
         // (NOTE: an earlier version of this code used captureDelayHours=-1.
         //  That value is REJECTED by the API with errorCode 164
         //  "Auto-capture delay invalid or out of range". captureDelayHours is
         //  only for delayed AUTOMATIC capture, not for switching to manual.)
+        paymentRequest.putAdditionalDataItem("authorisationType", "PreAuth");
         paymentRequest.putAdditionalDataItem("manualCapture", "true");
-
         // === 3DS2 (Native preferred, same as regular /payments) ================
         // Pre-auth is shopper-present, so we run full SCA. The card is verified
         // for the FULL amount; subsequent adjust/capture calls don't re-trigger
@@ -894,6 +909,31 @@ public class ApiController {
         paymentRequest.setBrowserInfo(body.getBrowserInfo());
         paymentRequest.setShopperIP("192.168.0.1");
         paymentRequest.setShopperInteraction(PaymentRequest.ShopperInteractionEnum.ECOMMERCE);
+
+        // === Phase 11d: "Save card" tokenisation =============================
+        // Drop-in surfaces the consent checkbox via card.enableStoreDetails.
+        // When the shopper ticks it, the submitted state.data carries
+        // storePaymentMethod=true. We pair that with shopperReference (the
+        // Vault key) and recurringProcessingModel=CardOnFile.
+        //
+        // CardOnFile model is the right choice here because the preauth flow
+        // is shopper-PRESENT (with full 3DS2 SCA); future re-uses of the
+        // token will be shopper-initiated and will pass full SCA again.
+        // Subscription is for unattended scheduled charges. UnscheduledCardOnFile
+        // is for ad-hoc merchant-initiated charges (e.g. account top-ups).
+        // Adyen docs:
+        //   https://docs.adyen.com/online-payments/tokenization/create-tokens/
+        //   https://docs.adyen.com/online-payments/tokenization/#recurring-processing-model
+        if (Boolean.TRUE.equals(body.getStorePaymentMethod())
+                && body.getShopperReference() != null
+                && !body.getShopperReference().isBlank()) {
+            paymentRequest.setStorePaymentMethod(true);
+            paymentRequest.setShopperReference(body.getShopperReference());
+            paymentRequest.setRecurringProcessingModel(
+                    PaymentRequest.RecurringProcessingModelEnum.CARDONFILE);
+            log.info("Preauth with save-card consent: shopperReference={} model=CardOnFile",
+                    body.getShopperReference());
+        }
 
         var billingAddress = new BillingAddress();
         billingAddress.setCity("Amsterdam");
@@ -1042,5 +1082,243 @@ public class ApiController {
     @GetMapping("/api/payments-list")
     public ResponseEntity<List<PaymentStore.PaymentRecord>> paymentsList() {
         return ResponseEntity.ok(paymentStore.snapshot());
+    }
+
+    // ========================================================================
+    // === Module 3 / Phase 11c: adjust + cancel + refund ================
+    // ========================================================================
+
+    /** Shared status-gating helper. Returns null on OK, or a 4xx response on
+     *  illegal transitions. Centralises the rules so all three modification
+     *  endpoints stay in sync with each other. */
+    private ResponseEntity<Map<String, Object>> requireStatus(
+            PaymentStore.PaymentRecord record,
+            String pspReference,
+            Set<PaymentStore.Status> allowed) {
+        if (record == null) {
+            return ResponseEntity.status(404).body(Map.of(
+                    "error", "no stored payment for this pspReference",
+                    "pspReference", pspReference));
+        }
+        if (!allowed.contains(record.status())) {
+            return ResponseEntity.status(409).body(Map.of(
+                    "error", "illegal status transition",
+                    "currentStatus", record.status().name(),
+                    "allowedFrom", allowed.stream().map(Enum::name).toList()));
+        }
+        return null;
+    }
+
+    /**
+     * POST /api/modify-amount — adjust an authorised amount up or down.
+     * Workshop module: Module 3 / Phase 11c
+     * Adyen docs:      https://docs.adyen.com/online-payments/adjust-authorisation/adjust-with-preauth/#adjust-auth
+     *                  https://docs.adyen.com/api-explorer/Checkout/latest/post/payments/(paymentPspReference)/amountUpdates
+     * What & Why:      Common in hotels / car rental — the original auth
+     *                  reserved €100, but the final bill is €120. We POST
+     *                  /amountUpdates with the NEW total, Adyen tries to
+     *                  reserve the delta, and the AUTHORISATION_ADJUSTMENT
+     *                  webhook tells us the outcome.
+     *
+     *                  Body shape: { "pspReference": "<auth>", "amount": { value, currency } }
+     *                  We accept it from AUTHORISED or ADJUSTED — the latter
+     *                  allows multiple successive adjustments.
+     */
+    @PostMapping("/api/modify-amount")
+    public ResponseEntity<Map<String, Object>> modifyAmount(@RequestBody Map<String, Object> body)
+            throws IOException {
+        String pspReference = body.get("pspReference") instanceof String s ? s : null;
+        if (pspReference == null || pspReference.isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of("error", "missing pspReference"));
+        }
+
+        // Read the new total amount (REQUIRED — there's no useful default).
+        Long newValue = null;
+        String newCurrency = null;
+        Object amountObj = body.get("amount");
+        if (amountObj instanceof Map<?, ?> amountMap) {
+            if (amountMap.get("value") instanceof Number n) newValue = n.longValue();
+            if (amountMap.get("currency") instanceof String c) newCurrency = c;
+        }
+        if (newValue == null || newValue <= 0L || newCurrency == null || newCurrency.isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of("error", "missing or invalid amount"));
+        }
+
+        PaymentStore.PaymentRecord existing = paymentStore.get(pspReference);
+        ResponseEntity<Map<String, Object>> guard = requireStatus(existing, pspReference,
+                Set.of(PaymentStore.Status.AUTHORISED, PaymentStore.Status.ADJUSTED));
+        if (guard != null) return guard;
+
+        var amountUpdate = new com.adyen.model.checkout.PaymentAmountUpdateRequest()
+                .merchantAccount(applicationConfiguration.getAdyenMerchantAccount())
+                .amount(new Amount().value(newValue).currency(newCurrency))
+                .reference(instanceId.newReference());
+
+        var requestOptions = new RequestOptions();
+        requestOptions.setIdempotencyKey(UUID.randomUUID().toString());
+
+        log.info("Amount-update request: pspReference={} {} {} → {} {}",
+                pspReference, existing.amountValue(), existing.amountCurrency(), newValue, newCurrency);
+        com.adyen.model.checkout.PaymentAmountUpdateResponse response;
+        try {
+            response = modificationsApi.updateAuthorisedAmount(pspReference, amountUpdate, requestOptions);
+        } catch (ApiException e) {
+            log.warn("Amount-update failed for pspReference={}: status={} errorCode={} message={}",
+                    pspReference, e.getStatusCode(),
+                    e.getError() != null ? e.getError().getErrorCode() : null,
+                    e.getError() != null ? e.getError().getMessage() : e.getMessage());
+            return ResponseEntity.status(e.getStatusCode() > 0 ? e.getStatusCode() : 500).body(Map.of(
+                    "error", "adyen_api_error",
+                    "errorCode", e.getError() != null ? e.getError().getErrorCode() : "unknown",
+                    "message", e.getError() != null ? e.getError().getMessage() : e.getMessage()
+            ));
+        }
+        log.info("Amount-update response: status={} modification pspReference={}",
+                response.getStatus(), response.getPspReference());
+
+        // We optimistically write the NEW amount onto the record now so the
+        // UI reflects it immediately. If the AUTHORISATION_ADJUSTMENT webhook
+        // ends up failed (rare), we'll mark the row but leave the original
+        // amount displayed (we don't track per-modification deltas yet).
+        paymentStore.updateAmount(pspReference, newValue, newCurrency,
+                "API /amountUpdates",
+                "Adjust requested " + existing.amountValue() + " → " + newValue + " " + newCurrency);
+
+        return ResponseEntity.ok(Map.of(
+                "status", response.getStatus() != null ? response.getStatus().getValue() : null,
+                "pspReference", response.getPspReference(),
+                "originalPspReference", pspReference));
+    }
+
+    /**
+     * POST /api/cancel — cancel an authorisation before it's captured.
+     * Workshop module: Module 3 / Phase 11c
+     * Adyen docs:      https://docs.adyen.com/online-payments/cancel/
+     *                  https://docs.adyen.com/api-explorer/Checkout/latest/post/payments/(paymentPspReference)/cancels
+     * What & Why:      Releases the reserved funds. Once a payment is
+     *                  captured, /cancels won't work — you need /refunds.
+     *                  TECHNICAL_CANCEL is the same flow but triggered by
+     *                  Adyen (e.g. auth window expired). Both webhooks
+     *                  transition to CANCELLED.
+     *
+     *                  Body shape: { "pspReference": "<auth>" }
+     */
+    @PostMapping("/api/cancel")
+    public ResponseEntity<Map<String, Object>> cancel(@RequestBody Map<String, Object> body)
+            throws IOException {
+        String pspReference = body.get("pspReference") instanceof String s ? s : null;
+        if (pspReference == null || pspReference.isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of("error", "missing pspReference"));
+        }
+
+        PaymentStore.PaymentRecord existing = paymentStore.get(pspReference);
+        ResponseEntity<Map<String, Object>> guard = requireStatus(existing, pspReference,
+                Set.of(PaymentStore.Status.AUTHORISED, PaymentStore.Status.ADJUSTED));
+        if (guard != null) return guard;
+
+        var cancelRequest = new com.adyen.model.checkout.PaymentCancelRequest()
+                .merchantAccount(applicationConfiguration.getAdyenMerchantAccount())
+                .reference(instanceId.newReference());
+
+        var requestOptions = new RequestOptions();
+        requestOptions.setIdempotencyKey(UUID.randomUUID().toString());
+
+        log.info("Cancel request: pspReference={}", pspReference);
+        com.adyen.model.checkout.PaymentCancelResponse response;
+        try {
+            response = modificationsApi.cancelAuthorisedPaymentByPspReference(
+                    pspReference, cancelRequest, requestOptions);
+        } catch (ApiException e) {
+            log.warn("Cancel failed for pspReference={}: status={} errorCode={} message={}",
+                    pspReference, e.getStatusCode(),
+                    e.getError() != null ? e.getError().getErrorCode() : null,
+                    e.getError() != null ? e.getError().getMessage() : e.getMessage());
+            return ResponseEntity.status(e.getStatusCode() > 0 ? e.getStatusCode() : 500).body(Map.of(
+                    "error", "adyen_api_error",
+                    "errorCode", e.getError() != null ? e.getError().getErrorCode() : "unknown",
+                    "message", e.getError() != null ? e.getError().getMessage() : e.getMessage()
+            ));
+        }
+        log.info("Cancel response: status={} modification pspReference={}",
+                response.getStatus(), response.getPspReference());
+
+        paymentStore.transition(pspReference,
+                PaymentStore.Status.CANCEL_REQUESTED,
+                "API /cancels",
+                "Cancel posted to Adyen, awaiting webhook");
+
+        return ResponseEntity.ok(Map.of(
+                "status", response.getStatus() != null ? response.getStatus().getValue() : null,
+                "pspReference", response.getPspReference(),
+                "originalPspReference", pspReference));
+    }
+
+    /**
+     * POST /api/refund — refund a CAPTURED payment (full amount).
+     * Workshop module: Module 3 / Phase 11c
+     * Adyen docs:      https://docs.adyen.com/online-payments/refund/
+     *                  https://docs.adyen.com/api-explorer/Checkout/latest/post/payments/(paymentPspReference)/refunds
+     * What & Why:      Once funds have settled (CAPTURED), the only way to
+     *                  send them back is /refunds. The actual outcome
+     *                  arrives as a REFUND webhook (success=true) or
+     *                  REFUND_FAILED. A successful REFUND can later be
+     *                  reversed by the issuer (REFUNDED_REVERSED) — we treat
+     *                  that as REFUND_FAILED too.
+     *
+     *                  Workshop simplification: always full-amount refund.
+     *                  Partial refunds work the same way, just pass a
+     *                  smaller amount.
+     */
+    @PostMapping("/api/refund")
+    public ResponseEntity<Map<String, Object>> refund(@RequestBody Map<String, Object> body)
+            throws IOException {
+        String pspReference = body.get("pspReference") instanceof String s ? s : null;
+        if (pspReference == null || pspReference.isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of("error", "missing pspReference"));
+        }
+
+        PaymentStore.PaymentRecord existing = paymentStore.get(pspReference);
+        ResponseEntity<Map<String, Object>> guard = requireStatus(existing, pspReference,
+                Set.of(PaymentStore.Status.CAPTURED));
+        if (guard != null) return guard;
+
+        var refundRequest = new com.adyen.model.checkout.PaymentRefundRequest()
+                .merchantAccount(applicationConfiguration.getAdyenMerchantAccount())
+                .amount(new Amount()
+                        .value(existing.amountValue())
+                        .currency(existing.amountCurrency()))
+                .reference(instanceId.newReference());
+
+        var requestOptions = new RequestOptions();
+        requestOptions.setIdempotencyKey(UUID.randomUUID().toString());
+
+        log.info("Refund request: pspReference={} amount={} {}",
+                pspReference, existing.amountValue(), existing.amountCurrency());
+        com.adyen.model.checkout.PaymentRefundResponse response;
+        try {
+            response = modificationsApi.refundCapturedPayment(pspReference, refundRequest, requestOptions);
+        } catch (ApiException e) {
+            log.warn("Refund failed for pspReference={}: status={} errorCode={} message={}",
+                    pspReference, e.getStatusCode(),
+                    e.getError() != null ? e.getError().getErrorCode() : null,
+                    e.getError() != null ? e.getError().getMessage() : e.getMessage());
+            return ResponseEntity.status(e.getStatusCode() > 0 ? e.getStatusCode() : 500).body(Map.of(
+                    "error", "adyen_api_error",
+                    "errorCode", e.getError() != null ? e.getError().getErrorCode() : "unknown",
+                    "message", e.getError() != null ? e.getError().getMessage() : e.getMessage()
+            ));
+        }
+        log.info("Refund response: status={} modification pspReference={}",
+                response.getStatus(), response.getPspReference());
+
+        paymentStore.transition(pspReference,
+                PaymentStore.Status.REFUND_REQUESTED,
+                "API /refunds",
+                "Refund posted to Adyen, awaiting webhook");
+
+        return ResponseEntity.ok(Map.of(
+                "status", response.getStatus() != null ? response.getStatus().getValue() : null,
+                "pspReference", response.getPspReference(),
+                "originalPspReference", pspReference));
     }
 }

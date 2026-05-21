@@ -21,6 +21,8 @@
 
     <!-- Server-rendered values for the JS bootstrap. -->
     <div id="clientKey" class="hidden" th:text="${clientKey}"></div>
+    <!-- Phase 11d: shopperReference used by the "Save card" checkbox. -->
+    <div id="shopperReference" class="hidden" th:text="${shopperReference}"></div>
 
     <div class="preauth-container">
 
@@ -98,9 +100,9 @@
             <div class="webhook-feed-header">
                 <h3>Live Webhook Feed</h3>
                 <span class="webhook-feed-filter"
-                      title="Only webhooks whose merchantReference starts with this prefix are shown. Other workshop participants on the same merchant account are filtered out.">
+                      title="Two filters: (1) server only forwards webhooks whose merchantReference starts with your instance prefix, so other workshop participants on the same merchant account are filtered out; (2) this page additionally hides webhooks that don't relate to a payment created via /preauthorisation (so /checkout and /subscription noise stays out).">
                     filter:
-                    <code th:text="${instancePrefix} + '-…'"></code>
+                    <code th:text="${instancePrefix} + '-… · /preauthorisation only'"></code>
                 </span>
                 <span id="webhook-feed-status" class="webhook-feed-status webhook-feed-status-idle">
                     Connecting…

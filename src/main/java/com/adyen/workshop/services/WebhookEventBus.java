@@ -213,6 +213,15 @@ public class WebhookEventBus {
             String eventCode,
             boolean success,
             String pspReference,
+            // Adyen's TOP-LEVEL "originalReference" — populated for modification
+            // events (CAPTURE / CANCELLATION / REFUND / AUTHORISATION_ADJUSTMENT)
+            // and is the pspReference of the ORIGINAL /payments call. The Live
+            // Webhook Feed's per-page filter uses this to recognise modification
+            // events for payments authored on /preauthorisation, since the
+            // event's own pspReference would be the modification's psp (not in
+            // the page's "known pspReferences" set).
+            // Docs: https://docs.adyen.com/development-resources/webhooks/understand-notifications/#fields
+            String originalReference,
             String merchantReference,
             String paymentMethod,
             Long amountValue,
@@ -233,6 +242,7 @@ public class WebhookEventBus {
                     item.getEventCode(),
                     item.isSuccess(),
                     item.getPspReference(),
+                    item.getOriginalReference(),
                     item.getMerchantReference(),
                     item.getPaymentMethod(),
                     amountValue,

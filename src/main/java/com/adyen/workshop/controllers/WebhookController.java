@@ -180,12 +180,15 @@ public class WebhookController {
     /**
      * Extract `recurringDetailReference` (the token) from an AUTHORISATION webhook
      * and persist it via TokenStore.
-     * Workshop module: Module 2 / Phase 8
-     * Adyen docs:      https://docs.adyen.com/online-payments/tokenization/create-a-token/#receive-token
+     * Workshop modules:
+     *   - Module 2 / Phase 8  — subscription tokenisation (zero-auth)
+     *   - Module 3 / Phase 11d — "Save card" checkbox during preauth
+     * Adyen docs:      https://docs.adyen.com/online-payments/tokenization/create-tokens/#receive-token
      * What & Why:      Adyen returns the token AFTER the synchronous /payments
      *                  response, via a webhook. additionalData carries:
      *                    - recurring.recurringDetailReference: the token itself
      *                    - recurring.shopperReference:         our shopper id
+     *                    - recurringProcessingModel:           Subscription / CardOnFile
      *                    - paymentMethod:                       brand (visa, mc, ...)
      *                  Only successful AUTHORISATION events carry a token; other
      *                  event codes are ignored here.
@@ -228,10 +231,20 @@ public class WebhookController {
         // Brand is useful for UI ("Visa ending in 1111") but optional.
         String brand = additionalData.get("paymentMethod");
 
+        // recurringProcessingModel is echoed back by Adyen when present in the
+        // original /payments call. We use it to label the TokenRecord so the
+        // admin UI can tell Subscription tokens (zero-auth, scheduled charges)
+        // apart from CardOnFile tokens (saved during checkout/preauth, used
+        // for shopper-initiated re-purchases). Falls back to "Subscription"
+        // for backward compatibility with Phase 8 records.
+        String model = additionalData.getOrDefault("recurringProcessingModel", "Subscription");
+
+        log.info("Token captured: shopperReference={} brand={} model={} token={}",
+                shopperRef, brand, model, token);
         tokenStore.save(shopperRef, new TokenStore.TokenRecord(
                 token,
                 brand,
-                "Subscription",   // Phase 8 only uses Subscription model
+                model,
                 Instant.now()));
     }
 
@@ -261,12 +274,23 @@ public class WebhookController {
 
         // The lookup key is ALWAYS the original payment's pspReference. For
         // AUTHORISATION events the item's own pspReference IS the original;
-        // for modifications (CAPTURE / CANCELLATION / REFUND) Adyen sets the
-        // original in additionalData["originalReference"] and the new psp on
-        // the item itself.
-        String originalPsp = (item.getAdditionalData() != null)
-                ? item.getAdditionalData().get("originalReference")
-                : null;
+        // for modifications (CAPTURE / CANCELLATION / REFUND /
+        // AUTHORISATION_ADJUSTMENT) Adyen sets the original payment's psp in
+        // the TOP-LEVEL `originalReference` field (NOT inside additionalData)
+        // and the new psp on the item itself.
+        // Docs: https://docs.adyen.com/development-resources/webhooks/understand-notifications/#fields
+        //
+        // (Earlier we looked this up inside additionalData, which silently
+        //  failed for every modification webhook — PaymentStore never
+        //  transitioned past *_REQUESTED. The UI stayed stuck on "pending"
+        //  until the next polling cycle, when nothing had changed server-side.)
+        String originalPsp = item.getOriginalReference();
+        // Fallback: some older payloads (or test fixtures) put it in
+        // additionalData. Keep tolerating that so we don't regress on
+        // hand-crafted webhooks used in smoke tests.
+        if ((originalPsp == null || originalPsp.isBlank()) && item.getAdditionalData() != null) {
+            originalPsp = item.getAdditionalData().get("originalReference");
+        }
         String lookupPsp = (originalPsp != null && !originalPsp.isBlank())
                 ? originalPsp
                 : item.getPspReference();
@@ -301,14 +325,56 @@ public class WebhookController {
                     eventCode,
                     "Capture failed: " + reason);
 
-            default -> {
-                // Phase 11c will handle CANCELLATION, TECHNICAL_CANCEL,
-                // AUTHORISATION_ADJUSTMENT, REFUND, REFUND_FAILED,
-                // REFUNDED_REVERSED. Until then we just log so the workshop
-                // user can see "unhandled" events on the live feed but knows
-                // PaymentStore won't reflect them yet.
-                log.debug("Webhook eventCode '{}' not yet handled by PaymentStore (Phase 11c)", eventCode);
-            }
+            // Adjust authorisation outcome.
+            // Docs: https://docs.adyen.com/online-payments/adjust-authorisation/adjust-with-preauth/#asynchronous-flow
+            // The /api/modify-amount handler already optimistically wrote the
+            // new amount + ADJUSTED status, so a successful webhook is just a
+            // confirmation. On failure we annotate history but keep the
+            // optimistic amount (workshop simplification — productionising
+            // this would mean tracking pending adjustments separately).
+            case "AUTHORISATION_ADJUSTMENT" -> paymentStore.transition(lookupPsp,
+                    success ? PaymentStore.Status.ADJUSTED : PaymentStore.Status.AUTHORISED,
+                    eventCode,
+                    success ? "Adjust confirmed" : "Adjust failed: " + reason);
+
+            // Cancel outcomes.
+            // CANCELLATION — Adyen processed our explicit /cancels request.
+            // TECHNICAL_CANCEL — Adyen voided the auth on its own (e.g.
+            //                    the auth window expired before capture).
+            // Docs: https://docs.adyen.com/online-payments/cancel/
+            case "CANCELLATION" -> paymentStore.transition(lookupPsp,
+                    success ? PaymentStore.Status.CANCELLED : PaymentStore.Status.CANCEL_FAILED,
+                    eventCode,
+                    success ? "Cancellation confirmed" : "Cancellation failed: " + reason);
+
+            case "TECHNICAL_CANCEL" -> paymentStore.transition(lookupPsp,
+                    PaymentStore.Status.CANCELLED,
+                    eventCode,
+                    "Technical cancel by Adyen: " + reason);
+
+            // Refund outcomes.
+            // Docs: https://docs.adyen.com/online-payments/refund/
+            // REFUND          — refund went through OR failed (check success).
+            // REFUND_FAILED   — explicit failure event.
+            // REFUNDED_REVERSED — the issuer reversed a previously successful
+            //                     refund. Treat as a refund failure so the UI
+            //                     surfaces the regression.
+            case "REFUND" -> paymentStore.transition(lookupPsp,
+                    success ? PaymentStore.Status.REFUNDED : PaymentStore.Status.REFUND_FAILED,
+                    eventCode,
+                    success ? "Refund confirmed" : "Refund failed: " + reason);
+
+            case "REFUND_FAILED" -> paymentStore.transition(lookupPsp,
+                    PaymentStore.Status.REFUND_FAILED,
+                    eventCode,
+                    "Refund failed: " + reason);
+
+            case "REFUNDED_REVERSED" -> paymentStore.transition(lookupPsp,
+                    PaymentStore.Status.REFUND_FAILED,
+                    eventCode,
+                    "Refund reversed by issuer: " + reason);
+
+            default -> log.debug("Webhook eventCode '{}' not mapped to PaymentStore", eventCode);
         }
     }
 }

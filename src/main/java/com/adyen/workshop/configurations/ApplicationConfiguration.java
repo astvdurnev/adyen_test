@@ -20,6 +20,23 @@ public class ApplicationConfiguration {
     @Value("${ADYEN_HMAC_KEY:#{null}}") // Don't edit @Value(...)
     private String adyenHmacKey; // We'll cover this in step 16.
 
+    /**
+     * Stable customer identifier used for shopper-bound features:
+     *   - Module 2 / Phase 8 — subscription tokenisation
+     *   - Module 3 / Phase 11d — "Save card" on the /preauthorisation page
+     * Workshop default: {@code workshop-shopper-001}. Override with the
+     * environment variable {@code ADYEN_SHOPPER_REFERENCE} if you want to
+     * isolate tokens between flows or multiple workshop runs.
+     *
+     * IMPORTANT: tokens in TokenStore are keyed by shopperReference, so if
+     * you save a card via /preauthorisation while the subscription flow
+     * also uses the default value, the second save will overwrite the
+     * first locally (Adyen Vault still stores both, but TokenStore only
+     * tracks the latest one).
+     */
+    @Value("${ADYEN_SHOPPER_REFERENCE:workshop-shopper-001}")
+    private String adyenShopperReference;
+
     public int getServerPort() {
         return serverPort;
     }
@@ -58,5 +75,13 @@ public class ApplicationConfiguration {
 
     public void setAdyenHmacKey(String adyenHmacKey) {
         this.adyenHmacKey = adyenHmacKey;
+    }
+
+    public String getAdyenShopperReference() {
+        return adyenShopperReference;
+    }
+
+    public void setAdyenShopperReference(String adyenShopperReference) {
+        this.adyenShopperReference = adyenShopperReference;
     }
 }
