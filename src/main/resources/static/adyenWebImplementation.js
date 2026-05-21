@@ -151,6 +151,44 @@ async function startCheckout() {
             onError: (error, component) => {
                 console.error("onError", error.name, error.message, error.stack, component);
                 window.location.href = "/result/error";
+            },
+
+            // === Step 13: onAdditionalDetails — finalises Native 3DS2 / inline actions ===
+            // Drop-in fires this when the shopper completes an inline `action` returned
+            // by /api/payments — most commonly a Native 3DS2 challenge ("threeDS2"), but
+            // also QR-code scans, voucher input, etc. The SDK packages the challenge
+            // response into `state.data`; we forward it to /api/payments/details so
+            // Adyen can verify and return the final outcome.
+            //
+            // NOTE: this hook is only called for Native 3DS2. The Redirect 3DS2 path
+            // doesn't come back here — it lands on GET /handleShopperRedirect instead.
+            // Both ultimately call /payments/details on Adyen — just from different sides.
+            // Docs: https://docs.adyen.com/online-payments/build-your-integration/advanced-flow/?platform=Web&integration=Drop-in#step-7-submit-additional-details
+            onAdditionalDetails: async (state, component, actions) => {
+                console.info("onAdditionalDetails", state, component);
+                try {
+                    const { resultCode } = await fetch("/api/payments/details", {
+                        method: "POST",
+                        body: state.data ? JSON.stringify(state.data) : "",
+                        headers: {
+                            "Content-Type": "application/json",
+                        }
+                    }).then(response => response.json());
+
+                    if (!resultCode) {
+                        console.warn("No resultCode in /api/payments/details response, rejecting.");
+                        actions.reject();
+                        return;
+                    }
+
+                    // Hand the result back to the SDK; it then routes us to
+                    // onPaymentCompleted or onPaymentFailed exactly like a one-shot
+                    // /payments would.
+                    actions.resolve({ resultCode });
+                } catch (error) {
+                    console.error(error);
+                    actions.reject();
+                }
             }
         };
 

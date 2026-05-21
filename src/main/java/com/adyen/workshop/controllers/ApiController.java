@@ -140,12 +140,13 @@ public class ApiController {
         // list in the Customer Area, otherwise Adyen will refuse the redirect.
         paymentRequest.setReturnUrl("http://localhost:8080/handleShopperRedirect");
 
-        // === Step 12: 3D Secure 2 Redirect flow =======================================
-        // 3DS2 is the SCA (Strong Customer Authentication) protocol required by PSD2 in
-        // the EU. Without these extra fields, Adyen will Refuse any card that requires
-        // 3DS2 (most EU cards in 2026). We choose the *Redirect* variant for the workshop
-        // because it's simpler than Native — the shopper is sent to an Adyen-hosted page
-        // for the challenge and comes back via returnUrl.
+        // === Step 12 + Step 13: 3D Secure 2 (Native preferred, Redirect fallback) =====
+        // 3DS2 is the SCA (Strong Customer Authentication) protocol required by PSD2.
+        // Without these extra fields Adyen will Refuse any card that requires 3DS2 (most
+        // EU cards in 2026). We ask Adyen to use the *Native* flow when supported by the
+        // issuer (challenge rendered INSIDE the Drop-in via threeDS2 web component) and
+        // to fall back to *Redirect* (Adyen-hosted page) when the issuer can't do native.
+        // Docs (Native):   https://docs.adyen.com/online-payments/3d-secure/native-3ds2/web-drop-in/
         // Docs (Redirect): https://docs.adyen.com/online-payments/3d-secure/redirect-3ds2/web-drop-in/
 
         // AuthenticationData tells Adyen we want 3DS2 attempted on every card.
@@ -154,16 +155,14 @@ public class ApiController {
         // for low-risk transactions; the shopper just sees the regular Drop-in confirm screen.
         var authenticationData = new AuthenticationData();
         authenticationData.setAttemptAuthentication(AuthenticationData.AttemptAuthenticationEnum.ALWAYS);
-        paymentRequest.setAuthenticationData(authenticationData);
 
-        // To switch to Native 3DS2 (challenge rendered INSIDE the Drop-in instead of via
-        // a full-page redirect), uncomment the two lines below. The Drop-in will then
-        // surface an `action` of type threeDS2 that the frontend completes via
-        // onAdditionalDetails → POST /api/payments/details (Phase 5).
-        // Docs (Native): https://docs.adyen.com/online-payments/3d-secure/native-3ds2/web-drop-in/
-        // authenticationData.setThreeDSRequestData(
-        //         new ThreeDSRequestData().nativeThreeDS(ThreeDSRequestData.NativeThreeDSEnum.PREFERRED));
-        // paymentRequest.setAuthenticationData(authenticationData);
+        // PREFERRED = use Native 3DS2 if the issuer supports it; transparently fall back to
+        // Redirect 3DS2 when not. This is the safest mode for production because it gives
+        // the best UX (no full-page redirect) where possible without breaking on issuers
+        // stuck on legacy flows. Other values: DISABLED (force Redirect).
+        authenticationData.setThreeDSRequestData(
+                new ThreeDSRequestData().nativeThreeDS(ThreeDSRequestData.NativeThreeDSEnum.PREFERRED));
+        paymentRequest.setAuthenticationData(authenticationData);
 
         // The browser origin that initiated the payment. Used by Adyen during the 3DS2
         // device fingerprinting step. Must match a value in your Client Key "Allowed
@@ -231,12 +230,41 @@ public class ApiController {
         return ResponseEntity.ok().body(response);
     }
 
-    // Step 13 - Handle details call (triggered after Native 3DS2 flow)
+    /**
+     * POST /api/payments/details — finalises a payment that needed an extra step
+     * (Native 3DS2 challenge, QR scan, voucher submission, etc.).
+     * Workshop step(s): Step 13
+     * Adyen docs:       https://docs.adyen.com/api-explorer/Checkout/latest/post/payments/details
+     * What & Why:       When /payments returns an `action` (e.g. Native 3DS2 challenge),
+     *                   the Drop-in completes that action client-side and POSTs the
+     *                   resulting `state.data` here. We forward it to Adyen unchanged;
+     *                   Adyen verifies the challenge response and returns the final
+     *                   resultCode (Authorised / Refused / ...).
+     *                   This is the INLINE counterpart of /handleShopperRedirect (which
+     *                   handles the same thing for the *Redirect* flow).
+     */
     @PostMapping("/api/payments/details")
-    public ResponseEntity<PaymentDetailsResponse> paymentsDetails(@RequestBody PaymentDetailsRequest detailsRequest) throws IOException, ApiException
-    {
+    public ResponseEntity<PaymentDetailsResponse> paymentsDetails(@RequestBody PaymentDetailsRequest detailsRequest)
+            throws IOException, ApiException {
+        // We forward the SDK's `state.data` body verbatim. The Adyen Java library
+        // already deserialised it into a PaymentDetailsRequest, which carries either:
+        //   - `threeDSResult`        (Native 3DS2 challenge response), or
+        //   - `redirectResult`       (if the Drop-in somehow surfaced a redirect here), or
+        //   - `details` map          (catch-all for QR / voucher / etc.)
+        // Docs: https://docs.adyen.com/online-payments/build-your-integration/advanced-flow/?platform=Web&integration=Drop-in#step-7-submit-additional-details
+        log.info("Calling /payments/details (inline action completion)");
 
-        return ResponseEntity.ok().body(null);
+        var response = paymentsApi.paymentsDetails(detailsRequest);
+
+        // pspReference here is the same one we got from the original /payments call;
+        // logging both lets us correlate the two halves of a 3DS2 challenge in logs.
+        log.info("/payments/details response: resultCode={} pspReference={}",
+                response.getResultCode(), response.getPspReference());
+
+        // The Drop-in reads the resultCode from this response inside its
+        // onAdditionalDetails handler and decides which final state to render
+        // (success / failure / yet another action — rare but possible).
+        return ResponseEntity.ok().body(response);
     }
 
     /**

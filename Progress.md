@@ -144,17 +144,30 @@ Tasks:
 
 ---
 
-## Phase 5 — Native 3D Secure 2 *(SKIPPED — optional)*
+## Phase 5 — Native 3D Secure 2  *(DONE — browser-verification pending)*
 
-Skipped intentionally: the Redirect 3DS2 flow from Phase 4 already covers the
-workshop's payment-acceptance goal. Native 3DS2 is a UX improvement (inline
-challenge instead of a full-page redirect) that can be added later.
+**Goal:** Trigger and complete a 3DS2 challenge inline (no Adyen-hosted redirect),
+using the `onAdditionalDetails` hook on the Drop-in.
 
-If you want to revisit:
-- Uncomment the `ThreeDSRequestData().nativeThreeDS(PREFERRED)` block in
-  `ApiController.payments(...)`.
-- Implement `POST /api/payments/details` (call `paymentsApi.paymentsDetails(...)`).
-- Add `onAdditionalDetails` hook on the Drop-in to POST to that endpoint.
+Covers README step: **13**.
+
+Tasks:
+- [x] Backend: enable `ThreeDSRequestData().nativeThreeDS(PREFERRED)` on the
+      `/api/payments` request so Adyen tries Native 3DS2 first and falls back to
+      Redirect only when the issuer can't do native.
+- [x] Backend: implement `POST /api/payments/details` →
+      `paymentsApi.paymentsDetails(detailsRequest)`, with reference-correlated logging.
+- [x] Frontend: add `onAdditionalDetails(state, component, actions)` to the Drop-in
+      configuration → POST `state.data` to `/api/payments/details`, then
+      `actions.resolve({ resultCode })`.
+
+**Verification:**
+1. [x] Non-3DS card stays frictionless (curl: Authorised, no action).
+2. [x] `/api/payments/details` endpoint reachable (curl with empty body → expected
+       Adyen-side 500 / malformed reject).
+3. [ ] **Manual browser test pending:** pay with a 3DS2-mandatory card. The challenge
+       should now appear INSIDE the Drop-in widget (small modal) instead of a full-page
+       redirect to a `test.adyen.com` URL.
 
 ---
 
