@@ -81,7 +81,7 @@ Tasks:
 
 ---
 
-## Phase 3 — End-to-end card payment (no 3DS2 yet)
+## Phase 3 — End-to-end card payment (no 3DS2 yet)  *(BACKEND DONE — browser test pending)*
 
 **Goal:** A shopper can pay with a non-3DS test card and land on the correct result page
 (`/result/success`, `/result/failed`, etc.).
@@ -89,22 +89,24 @@ Tasks:
 Covers README steps: **9, 10, 11**.
 
 Tasks:
-- [ ] Backend: `POST /api/payments` in `ApiController.java`
-  - [ ] Build `PaymentRequest` with amount EUR 99.98, merchant account, channel `WEB`
-  - [ ] Copy `paymentMethod` from request body
-  - [ ] Random `reference` (`UUID.randomUUID().toString()`)
-  - [ ] `returnUrl = "http://localhost:8080/handleShopperRedirect"`
-  - [ ] Add `RequestOptions` with idempotency key (Step 11)
-  - [ ] Call `paymentsApi.payments(request, requestOptions)`
-- [ ] Frontend: `adyenWebImplementation.js`
-  - [ ] Add `onSubmit(state, component, actions)` → POST to `/api/payments`, then `actions.resolve({ resultCode, action, order })`
-  - [ ] Add `onPaymentCompleted` / `onPaymentFailed` / `onError`
-  - [ ] Implement `handleOnPaymentCompleted` and `handleOnPaymentFailed` to redirect to `/result/...`
+- [x] Backend: `POST /api/payments` in `ApiController.java`
+  - [x] Build `PaymentRequest` with amount EUR 99.98, merchant account, channel `WEB`
+  - [x] Copy `paymentMethod` from request body
+  - [x] Random `reference` (`UUID.randomUUID().toString()`)
+  - [x] `returnUrl = "http://localhost:8080/handleShopperRedirect"`
+  - [x] Add `RequestOptions` with idempotency key (Step 11)
+  - [x] Call `paymentsApi.payments(request, requestOptions)`
+- [x] Frontend: `adyenWebImplementation.js`
+  - [x] Add `onSubmit(state, component, actions)` → POST to `/api/payments`, then `actions.resolve({ resultCode, action, order })`
+  - [x] Add `onPaymentCompleted` / `onPaymentFailed` / `onError`
+  - [x] Implement `handleOnPaymentCompleted` and `handleOnPaymentFailed` to redirect to `/result/...`
 
 **Verification:**
-1. Pay with a non-3DS test card (e.g. `4111 1111 1111 1111`, CVC `737`, any future date) → redirect to `/result/success`.
-2. Refuse card (`4000 3000 0000 0167` or similar Refused test card) → `/result/failed`.
-3. Hitting "Pay" twice with the same idempotency key does not create duplicate authorizations (check logs / CA → Transactions).
+1. [x] Curl test against backend: card `test_4111111111111111` → `resultCode: Authorised`,
+       pspReference assigned, logs correlate request/response by reference.
+2. [ ] **Manual browser test pending:** open `http://localhost:8080/checkout?type=dropin`,
+       pay with `4111 1111 1111 1111` / `03/30` / `737` → redirect to `/result/success`.
+3. [ ] **Manual:** pay with a "Refused" test card → redirect to `/result/failed`.
 
 ---
 

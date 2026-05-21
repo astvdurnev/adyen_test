@@ -81,6 +81,76 @@ async function startCheckout() {
                 "en-US": {
                     "creditCard.securityCode.label": "CVV/CVC"
                 }
+            },
+
+            // === Step 10: onSubmit handler ==========================================
+            // Drop-in fires this when the shopper clicks "Pay". `state.data` is the
+            // serialised payment-method blob (including the encrypted card fields),
+            // which we forward verbatim to /api/payments. The backend wraps it into a
+            // full PaymentRequest (amount, merchant account, reference, returnUrl) and
+            // calls Adyen.
+            // Docs: https://docs.adyen.com/online-payments/build-your-integration/advanced-flow/?platform=Web&integration=Drop-in#submit-payment-onsubmit
+            onSubmit: async (state, component, actions) => {
+                console.info("onSubmit", state, component);
+                try {
+                    // SDK runs its own validation first (`isValid`). We only proceed if
+                    // every field passes — otherwise the Drop-in already shows inline errors.
+                    if (state.isValid) {
+                        // We destructure the three fields the SDK needs to decide what to do
+                        // next:
+                        //   - resultCode: AUTHORISED / REFUSED / IDENTIFY_SHOPPER / ...
+                        //   - action:     present when 3DS2 / redirect / QR / etc. is required
+                        //   - order:      partial-payment / gift-card flows; usually undefined here
+                        // Docs: https://docs.adyen.com/online-payments/build-your-integration/payment-result-codes/
+                        const { action, order, resultCode } = await fetch("/api/payments", {
+                            method: "POST",
+                            body: state.data ? JSON.stringify(state.data) : "",
+                            headers: {
+                                "Content-Type": "application/json",
+                            }
+                        }).then(response => response.json());
+
+                        // No resultCode = backend or Adyen returned an unexpected shape.
+                        // `actions.reject()` tells Drop-in to display the generic error UI.
+                        if (!resultCode) {
+                            console.warn("No resultCode in /api/payments response, rejecting.");
+                            actions.reject();
+                            return;
+                        }
+
+                        // Hand the decision back to the SDK. If `action` is set, the Drop-in
+                        // will render the 3DS2 challenge / redirect / QR automatically. If not,
+                        // it routes us to onPaymentCompleted/onPaymentFailed below based on
+                        // the result code.
+                        actions.resolve({ resultCode, action, order });
+                    }
+                } catch (error) {
+                    console.error(error);
+                    actions.reject();
+                }
+            },
+
+            // Fired after Drop-in considers the payment journey successfully resolved
+            // (resultCode Authorised / Pending / Received). NOTE: "completed" here means
+            // "no more UI steps needed", NOT necessarily "money received" — for async
+            // methods you still wait for the AUTHORISATION webhook.
+            // Docs: https://docs.adyen.com/online-payments/build-your-integration/advanced-flow/?platform=Web&integration=Drop-in#present-the-payment-result
+            onPaymentCompleted: (result, component) => {
+                console.info("onPaymentCompleted", result, component);
+                handleOnPaymentCompleted(result, component);
+            },
+
+            // Fired on terminal-failure result codes (Refused / Cancelled / Error).
+            onPaymentFailed: (result, component) => {
+                console.info("onPaymentFailed", result, component);
+                handleOnPaymentFailed(result, component);
+            },
+
+            // Fired for SDK-level errors (network, validation, 3DS2 init failure, ...).
+            // Distinct from onPaymentFailed: this is about *us* not Adyen rejecting.
+            onError: (error, component) => {
+                console.error("onError", error.name, error.message, error.stack, component);
+                window.location.href = "/result/error";
             }
         };
 
@@ -148,17 +218,49 @@ async function startCheckout() {
     }
 }
 
-// Step 10 (next phase) will implement onSubmit / onPaymentCompleted / onPaymentFailed
-// and these stubs will get a real body. Left here so the file's intent stays visible.
+// === Step 10: route the shopper to the right result page ========================
+// We use full-page navigations (window.location.href) on purpose instead of a
+// JS-rendered result widget — it gives us a clean, bookmarkable URL per outcome
+// and survives a hard refresh. The target routes are served by ViewController and
+// render templates/result.html with the appropriate flavour.
+// Docs: https://docs.adyen.com/development-resources/overview-response-handling/#result-codes
 
-// Step 10 - Function to handle payment completion redirects (filled in Phase 3).
+/**
+ * Maps a "completed" payment result to the matching `/result/...` route.
+ * Authorised → success
+ * Pending / Received → pending (async methods like Klarna; final outcome arrives via webhook)
+ * anything else here is treated as an unexpected state → error page.
+ */
 function handleOnPaymentCompleted(response) {
-    // intentionally empty in Phase 2
+    switch (response.resultCode) {
+        case "Authorised":
+            window.location.href = "/result/success";
+            break;
+        case "Pending":
+        case "Received":
+            window.location.href = "/result/pending";
+            break;
+        default:
+            window.location.href = "/result/error";
+            break;
+    }
 }
 
-// Step 10 - Function to handle payment failure redirects (filled in Phase 3).
+/**
+ * Maps a "failed" payment result to the matching `/result/...` route.
+ * Cancelled / Refused → failed page with a short explanation.
+ * Other terminal failures fall back to the generic error page.
+ */
 function handleOnPaymentFailed(response) {
-    // intentionally empty in Phase 2
+    switch (response.resultCode) {
+        case "Cancelled":
+        case "Refused":
+            window.location.href = "/result/failed";
+            break;
+        default:
+            window.location.href = "/result/error";
+            break;
+    }
 }
 
 // Kick everything off as soon as the script is loaded.
