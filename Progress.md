@@ -110,7 +110,7 @@ Tasks:
 
 ---
 
-## Phase 4 — 3D Secure 2 (Redirect flow)
+## Phase 4 — 3D Secure 2 (Redirect flow)  *(BACKEND DONE — browser test pending)*
 
 **Goal:** Cards that require strong customer authentication complete the redirect-based 3DS2
 challenge and return to our result pages.
@@ -118,24 +118,29 @@ challenge and return to our result pages.
 Covers README steps: **12, 14**.
 
 Tasks:
-- [ ] Extend `POST /api/payments` (Step 12) with:
-  - [ ] `AuthenticationData` with `attemptAuthentication = ALWAYS`
-  - [ ] `paymentRequest.setOrigin("http://localhost:8080")`
-  - [ ] `paymentRequest.setBrowserInfo(body.getBrowserInfo())`
-  - [ ] `paymentRequest.setShopperIP("192.168.0.1")` *(or read from request)*
-  - [ ] `paymentRequest.setShopperInteraction(ECOMMERCE)`
-  - [ ] `BillingAddress` (Amsterdam / NL / 1012KK / Rokin 49) to satisfy risk rules
-- [ ] Add `GET /handleShopperRedirect` (Step 14)
-  - [ ] Accept `redirectResult` *and* `payload` query params
-  - [ ] Build `PaymentCompletionDetails`, populate the field that's present
-  - [ ] Call `paymentsApi.paymentsDetails(request)`
-  - [ ] Map `resultCode` to `/result/success | pending | failed | error`
-  - [ ] Return `RedirectView` with `?reason=<resultCode>`
+- [x] Extend `POST /api/payments` (Step 12) with:
+  - [x] `AuthenticationData` with `attemptAuthentication = ALWAYS`
+  - [x] `paymentRequest.setOrigin("http://localhost:8080")`
+  - [x] `paymentRequest.setBrowserInfo(body.getBrowserInfo())`
+  - [x] `paymentRequest.setShopperIP("192.168.0.1")` *(or read from request)*
+  - [x] `paymentRequest.setShopperInteraction(ECOMMERCE)`
+  - [x] `BillingAddress` (Amsterdam / NL / 1012KK / Rokin 49) to satisfy risk rules
+- [x] Add `GET /handleShopperRedirect` (Step 14)
+  - [x] Accept `redirectResult` *and* `payload` query params
+  - [x] Build `PaymentCompletionDetails`, populate the field that's present
+  - [x] Call `paymentsApi.paymentsDetails(request)`
+  - [x] Map `resultCode` to `/result/success | pending | failed | error`
+  - [x] Return `RedirectView` with `?reason=<resultCode>`
+  - [x] **Extra:** graceful `try/catch ApiException` so tampered/expired tokens land on
+        `/result/error?reason=invalid_redirect_token` instead of a 500 page
 
 **Verification:**
-1. Pay with a 3DS2-mandatory test card (e.g. `4917 6100 0000 0000` or any "3D Secure 2" entry on the [Adyen test cards page](https://docs.adyen.com/development-resources/testing/test-card-numbers/)).
-2. Browser is redirected to the Adyen-hosted challenge page.
-3. After completing the challenge, browser returns to `localhost:8080/handleShopperRedirect?redirectResult=...` and gets forwarded to `/result/success`.
+1. [x] Frictionless 3DS2 path still works (curl with non-3DS card → Authorised).
+2. [x] Missing redirect params → `/result/error?reason=missing_redirect_token` (302).
+3. [x] Bogus `redirectResult` → `/result/error?reason=invalid_redirect_token` (302).
+4. [ ] **Manual browser test pending:** pay with a 3DS2-mandatory test card
+       (e.g. `4917 6100 0000 0000`), complete the challenge on Adyen's hosted page,
+       and land on `/result/success`.
 
 ---
 

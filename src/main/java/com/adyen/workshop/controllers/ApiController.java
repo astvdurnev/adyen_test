@@ -135,10 +135,71 @@ public class ApiController {
 
         // returnUrl is where Adyen redirects the shopper after an off-site step
         // (3DS2 challenge, bank redirect for iDeal, Klarna confirmation page, ...).
-        // We handle that landing in GET /handleShopperRedirect (Phase 4 / Step 14).
+        // We handle that landing in GET /handleShopperRedirect (Step 14, see below).
         // CRITICAL: the domain of this URL must be in the Client Key "Allowed origins"
         // list in the Customer Area, otherwise Adyen will refuse the redirect.
         paymentRequest.setReturnUrl("http://localhost:8080/handleShopperRedirect");
+
+        // === Step 12: 3D Secure 2 Redirect flow =======================================
+        // 3DS2 is the SCA (Strong Customer Authentication) protocol required by PSD2 in
+        // the EU. Without these extra fields, Adyen will Refuse any card that requires
+        // 3DS2 (most EU cards in 2026). We choose the *Redirect* variant for the workshop
+        // because it's simpler than Native — the shopper is sent to an Adyen-hosted page
+        // for the challenge and comes back via returnUrl.
+        // Docs (Redirect): https://docs.adyen.com/online-payments/3d-secure/redirect-3ds2/web-drop-in/
+
+        // AuthenticationData tells Adyen we want 3DS2 attempted on every card.
+        // ALWAYS = always attempt SCA. Other values: NEVER (don't attempt), ALWAYS_USING_3D_SECURE.
+        // NOTE: even with ALWAYS, Adyen+issuer may grant a frictionless flow (no challenge UI)
+        // for low-risk transactions; the shopper just sees the regular Drop-in confirm screen.
+        var authenticationData = new AuthenticationData();
+        authenticationData.setAttemptAuthentication(AuthenticationData.AttemptAuthenticationEnum.ALWAYS);
+        paymentRequest.setAuthenticationData(authenticationData);
+
+        // To switch to Native 3DS2 (challenge rendered INSIDE the Drop-in instead of via
+        // a full-page redirect), uncomment the two lines below. The Drop-in will then
+        // surface an `action` of type threeDS2 that the frontend completes via
+        // onAdditionalDetails → POST /api/payments/details (Phase 5).
+        // Docs (Native): https://docs.adyen.com/online-payments/3d-secure/native-3ds2/web-drop-in/
+        // authenticationData.setThreeDSRequestData(
+        //         new ThreeDSRequestData().nativeThreeDS(ThreeDSRequestData.NativeThreeDSEnum.PREFERRED));
+        // paymentRequest.setAuthenticationData(authenticationData);
+
+        // The browser origin that initiated the payment. Used by Adyen during the 3DS2
+        // device fingerprinting step. Must match a value in your Client Key "Allowed
+        // origins" — keep this in sync if you move to a public hostname (ngrok, prod URL).
+        paymentRequest.setOrigin("http://localhost:8080");
+
+        // BrowserInfo is collected by Adyen.Web in the browser (window dimensions,
+        // user agent, color depth, timezone, ...) and shipped to us in `state.data`.
+        // The card issuer uses this for risk scoring and 3DS2 device fingerprinting.
+        // We simply forward what the SDK gave us — never fake these values yourself.
+        // Docs: https://docs.adyen.com/api-explorer/Checkout/latest/post/payments#request-browserInfo
+        paymentRequest.setBrowserInfo(body.getBrowserInfo());
+
+        // Shopper's IP address. In production you would extract this from the request
+        // headers (X-Forwarded-For, taking into account `server.forward-headers-strategy`
+        // in application.properties). For the workshop a placeholder LAN address is fine —
+        // Adyen accepts it on TEST. NOTE: real fraud screening on LIVE will rely on this.
+        paymentRequest.setShopperIP("192.168.0.1");
+
+        // ECOMMERCE = a one-off shopper-present payment (the shopper is filling the form
+        // right now). Alternatives: CONTAUTH (recurring on file), MOTO (mail/phone order).
+        // 3DS2 only applies to ECOMMERCE, so this field is effectively mandatory here.
+        // Docs: https://docs.adyen.com/api-explorer/Checkout/latest/post/payments#request-shopperInteraction
+        paymentRequest.setShopperInteraction(PaymentRequest.ShopperInteractionEnum.ECOMMERCE);
+
+        // BillingAddress is technically optional, but Adyen's RevenueProtect (risk engine)
+        // uses it heavily — without it, more transactions get flagged or challenged.
+        // For the workshop we hardcode an Amsterdam address; in production you'd populate
+        // it from the shopper's checkout form.
+        var billingAddress = new BillingAddress();
+        billingAddress.setCity("Amsterdam");
+        billingAddress.setCountry("NL");
+        billingAddress.setPostalCode("1012KK");
+        billingAddress.setStreet("Rokin");
+        billingAddress.setHouseNumberOrName("49");
+        paymentRequest.setBillingAddress(billingAddress);
 
         // === Step 11: Idempotency key =================================================
         // If the network blips or the shopper double-clicks "Pay", we may end up retrying
@@ -178,10 +239,85 @@ public class ApiController {
         return ResponseEntity.ok().body(null);
     }
 
-    // Step 14 - Handle Redirect 3DS2 during payment.
+    /**
+     * GET /handleShopperRedirect — landing endpoint after an off-site 3DS2 / redirect step.
+     * Workshop step(s): Step 14
+     * Adyen docs:       https://docs.adyen.com/online-payments/3d-secure/redirect-3ds2/web-drop-in/#handle-the-redirect-result
+     * What & Why:       After the shopper completes the 3DS2 challenge on Adyen's hosted
+     *                   page (or after a bank-redirect method like iDeal), Adyen redirects
+     *                   the browser back to this URL with either ?redirectResult=... or
+     *                   ?payload=... appended. We exchange that token for the final
+     *                   payment outcome by calling /payments/details, then redirect the
+     *                   shopper to the appropriate /result/... page.
+     */
     @GetMapping("/handleShopperRedirect")
-    public RedirectView redirect(@RequestParam(required = false) String payload, @RequestParam(required = false) String redirectResult) throws IOException, ApiException {
+    public RedirectView redirect(@RequestParam(required = false) String payload,
+                                 @RequestParam(required = false) String redirectResult) throws IOException, ApiException {
+        // The /payments/details call needs either a `redirectResult` (returned by 3DS2
+        // Redirect on modern Web Drop-in) OR a legacy `payload` (older flows / some
+        // redirect-only methods). We build a single PaymentCompletionDetails with
+        // whichever one is present.
+        // Docs: https://docs.adyen.com/api-explorer/Checkout/latest/post/payments/details
+        var paymentDetailsRequest = new PaymentDetailsRequest();
+        var paymentCompletionDetails = new PaymentCompletionDetails();
 
-        return null;
+        if (redirectResult != null && !redirectResult.isEmpty()) {
+            // Modern path: Adyen-hosted 3DS2 challenge returns a `redirectResult` token.
+            // It's a signed blob that only Adyen can decode — we just forward it.
+            paymentCompletionDetails.redirectResult(redirectResult);
+        } else if (payload != null && !payload.isEmpty()) {
+            // Legacy path: older flows / some bank redirects use `payload` instead.
+            paymentCompletionDetails.payload(payload);
+        } else {
+            // No token present → the shopper landed here directly or with a tampered URL.
+            // Send them to the generic error page rather than calling Adyen with nothing.
+            log.warn("/handleShopperRedirect called without redirectResult or payload — sending to /result/error");
+            return new RedirectView("/result/error?reason=missing_redirect_token");
+        }
+        paymentDetailsRequest.setDetails(paymentCompletionDetails);
+
+        log.info("Calling /payments/details after shopper redirect");
+        PaymentDetailsResponse paymentsDetailsResponse;
+        try {
+            paymentsDetailsResponse = paymentsApi.paymentsDetails(paymentDetailsRequest);
+        } catch (ApiException e) {
+            // Adyen rejected the redirectResult/payload — most likely the shopper hit
+            // this URL with a tampered or expired token. We deliberately don't surface
+            // the Adyen error to the browser (no info leak about our integration); a
+            // generic error page is the right UX.
+            log.warn("Adyen rejected /payments/details: status={} errorCode={} message={}",
+                    e.getStatusCode(), e.getError() != null ? e.getError().getErrorCode() : null, e.getMessage());
+            return new RedirectView("/result/error?reason=invalid_redirect_token");
+        }
+        log.info("/payments/details response: resultCode={} pspReference={}",
+                paymentsDetailsResponse.getResultCode(), paymentsDetailsResponse.getPspReference());
+
+        // Map the final result code to the same /result/... routes the Drop-in uses for
+        // the non-redirect path (see handleOnPaymentCompleted / handleOnPaymentFailed in
+        // adyenWebImplementation.js). Keeping the two branches symmetric means the UX
+        // doesn't depend on whether 3DS2 was frictionless or challenged.
+        // Docs: https://docs.adyen.com/development-resources/overview-response-handling/#result-codes
+        var redirectURL = "/result/";
+        switch (paymentsDetailsResponse.getResultCode()) {
+            case AUTHORISED:
+                redirectURL += "success";
+                break;
+            case PENDING:
+            case RECEIVED:
+                redirectURL += "pending";
+                break;
+            case REFUSED:
+                redirectURL += "failed";
+                break;
+            default:
+                // CANCELLED, ERROR, or anything unexpected → generic error page so the
+                // shopper sees *something* rather than a blank 200.
+                redirectURL += "error";
+                break;
+        }
+
+        // Append the resultCode as a query param so the result page can show a
+        // human-readable explanation (e.g. "Reason: REFUSED").
+        return new RedirectView(redirectURL + "?reason=" + paymentsDetailsResponse.getResultCode());
     }
 }
